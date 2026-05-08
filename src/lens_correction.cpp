@@ -25,6 +25,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <sys/stat.h>
 
 namespace rawalchemy {
 
@@ -156,32 +157,36 @@ bool applyLensCorrection(ImageBuffer& img,
             printf("  [Lensfun] Warning: system database load failed (code %d).\n", err);
         }
 
-        // Load custom database from file
-        FILE* f = fopen(params.customDbPath.c_str(), "rb");
-        if (f) {
-            fseek(f, 0, SEEK_END);
-            long sz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-            if (sz > 0) {
-                std::vector<char> xmlData(static_cast<size_t>(sz));
-                if (fread(xmlData.data(), 1, static_cast<size_t>(sz), f) == static_cast<size_t>(sz)) {
-                    err = db->Load(xmlData.data(), static_cast<size_t>(sz));
-                    if (err != LF_NO_ERROR) {
-                        printf("  [Lensfun] Warning: custom database load failed (code %d).\n", err);
-                    } else {
-                        printf("  [Lensfun] Loaded custom database: %s\n", params.customDbPath.c_str());
-                    }
-                }
-            }
-            fclose(f);
-        } else {
-            // Maybe it's a directory path
+        // Load custom database — detect directory vs file
+        struct stat st;
+        if (stat(params.customDbPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+            // Directory: let Lensfun scan for XML files
             err = db->Load(params.customDbPath.c_str());
             if (err != LF_NO_ERROR) {
                 printf("  [Lensfun] Warning: custom database path failed (code %d): %s\n",
                        err, params.customDbPath.c_str());
             } else {
                 printf("  [Lensfun] Loaded custom database: %s\n", params.customDbPath.c_str());
+            }
+        } else {
+            // File: read and parse as XML
+            FILE* f = fopen(params.customDbPath.c_str(), "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long sz = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                if (sz > 0) {
+                    std::vector<char> xmlData(static_cast<size_t>(sz));
+                    if (fread(xmlData.data(), 1, static_cast<size_t>(sz), f) == static_cast<size_t>(sz)) {
+                        err = db->Load(xmlData.data(), static_cast<size_t>(sz));
+                        if (err != LF_NO_ERROR) {
+                            printf("  [Lensfun] Warning: custom database load failed (code %d).\n", err);
+                        } else {
+                            printf("  [Lensfun] Loaded custom database: %s\n", params.customDbPath.c_str());
+                        }
+                    }
+                }
+                fclose(f);
             }
         }
     } else {

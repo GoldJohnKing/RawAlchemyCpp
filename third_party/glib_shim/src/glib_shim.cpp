@@ -151,17 +151,27 @@ gboolean g_file_get_contents(const gchar* filename, gchar** contents, gsize* len
     if (!filename || !contents) return FALSE;
     FILE* f = fopen(filename, "rb");
     if (!f) {
+        // Lensfun expects error to be set on failure (dereferences err->code)
+        if (error) {
+            g_set_error(error, 0, G_FILE_ERROR_ACCES,
+                       "Failed to open file: %s", filename);
+        }
         return FALSE;
     }
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
-    if (sz < 0) { fclose(f); return FALSE; }
+    if (sz < 0) {
+        if (error) g_set_error(error, 0, 1, "Failed to get file size: %s", filename);
+        fclose(f);
+        return FALSE;
+    }
     *contents = (gchar*)g_malloc((size_t)sz + 1);
     (*contents)[sz] = '\0';
     if ((long)fread(*contents, 1, (size_t)sz, f) != sz) {
         g_free(*contents);
         *contents = nullptr;
+        if (error) g_set_error(error, 0, 1, "Failed to read file: %s", filename);
         fclose(f);
         return FALSE;
     }
