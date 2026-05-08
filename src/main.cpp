@@ -70,6 +70,7 @@ static void printUsage(const char* prog) {
         "  --demosaic N       Demosaic: 3=AHD (default), 11=AAHD\n"
         "  --no-compress      Save TIFF without compression\n"
         "  --jpeg-quality N   JPEG quality 1-100 (default: 95)\n"
+        "  --jpeg-optimize   Optimize Huffman tables (smaller file, slower)\n"
         "  --info             Only print metadata\n"
         "  -h, --help         Show this help\n"
         "\n",
@@ -96,7 +97,8 @@ int main(int argc, char* argv[]) {
     bool   compress    = true;
     bool   infoOnly    = false;
     int    demosaicQ   = 3;
-    int    jpegQuality = 95;
+    int    jpegQuality  = 95;
+    bool   jpegOptimize = false;
 
     for (int i = 3; i < argc; ++i) {
         std::string opt = argv[i];
@@ -110,6 +112,7 @@ int main(int argc, char* argv[]) {
         else if (opt == "--no-boost")                    { doBoost = false; }
         else if (opt == "--no-compress")                 { compress = false; }
         else if (opt == "--jpeg-quality" && i + 1 < argc){ jpegQuality = std::atoi(argv[++i]); }
+        else if (opt == "--jpeg-optimize")               { jpegOptimize = true; }
         else if (opt == "--info")                        { infoOnly = true; }
         else if (opt == "--demosaic" && i + 1 < argc)    { demosaicQ = std::atoi(argv[++i]); }
         else if (opt == "-h" || opt == "--help")         { printUsage(argv[0]); return 0; }
@@ -252,8 +255,9 @@ int main(int argc, char* argv[]) {
             break;
 
         case OutFormat::Jpeg:
-            printf("[Save] 8-bit JPEG (quality=%d, 4:4:4)...\n", jpegQuality);
-            ok = rawalchemy::writeJpeg(img, outputPath, jpegQuality);
+            printf("[Save] 8-bit JPEG (quality=%d, 4:4:4%s)...\n", jpegQuality,
+                   jpegOptimize ? ", optimize" : "");
+            ok = rawalchemy::writeJpeg(img, outputPath, jpegQuality, jpegOptimize);
             break;
         }
 

@@ -8,8 +8,9 @@
  *   - Quality 95
  *   - No chroma subsampling (4:4:4)
  *   - Accurate DCT for best quality
+ *   - Optional Huffman table optimization (optimize=True in Pillow)
  *
- * Uses libjpeg-turbo (TurboJPEG API) for fast, high-quality JPEG encoding.
+ * Uses libjpeg-turbo (TurboJPEG 3 API) for fast, high-quality JPEG encoding.
  */
 
 #include "common.h"
@@ -23,8 +24,10 @@ namespace rawalchemy {
  * @param img       Image in float32 [0.0, 1.0] — will be clamped and converted to uint8
  * @param outPath   Output file path (should end in .jpg or .jpeg)
  * @param quality   JPEG quality 1-100 (default: 95)
+ * @param optimize  Compute optimal Huffman tables (slower, smaller file; default: false)
  * @return true on success, false on failure
  */
-bool writeJpeg(const ImageBuffer& img, const std::string& outPath, int quality = 95);
+bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
+               int quality = 95, bool optimize = false);
 
 } // namespace rawalchemy
