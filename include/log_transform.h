@@ -12,8 +12,8 @@
  * specific Log workflows.
  */
 
-#include "raw_alchemy/common.h"
-#include "raw_alchemy/color_data.h"
+#include "common.h"
+#include "color_data.h"
 #include <string>
 #include <vector>
 

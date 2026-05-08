@@ -6,8 +6,8 @@
  * OpenMP parallelized for speed.
  */
 
-#include "raw_alchemy/stylize.h"
-#include "raw_alchemy/metering.h"  // for ProPhoto luma coefficients
+#include "stylize.h"
+#include "metering.h"  // for ProPhoto luma coefficients
 #include <algorithm>
 
 #ifdef RA_USE_OPENMP

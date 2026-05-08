@@ -12,7 +12,7 @@
  * Uses libjpeg-turbo (TurboJPEG API) for fast, high-quality JPEG encoding.
  */
 
-#include "raw_alchemy/common.h"
+#include "common.h"
 #include <string>
 
 namespace rawalchemy {

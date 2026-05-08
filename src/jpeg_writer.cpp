@@ -10,7 +10,7 @@
  * Uses libjpeg-turbo (TurboJPEG API) for fast, high-quality JPEG encoding.
  */
 
-#include "raw_alchemy/jpeg_writer.h"
+#include "jpeg_writer.h"
 
 #include <cstdio>
 #include <vector>

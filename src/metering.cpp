@@ -9,7 +9,7 @@
  *   4. Return gain (caller applies it to the full image)
  */
 
-#include "raw_alchemy/metering.h"
+#include "metering.h"
 #include <cmath>
 #include <algorithm>
 #include <vector>

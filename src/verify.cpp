@@ -13,8 +13,8 @@
  *   5. Saturation / clipping check
  */
 
-#include "raw_alchemy/tiff_writer.h"  // for TiffCloser
-#include "raw_alchemy/common.h"
+#include "tiff_writer.h"  // for TiffCloser
+#include "common.h"
 
 #include <tiffio.h>
 #include <cstdio>

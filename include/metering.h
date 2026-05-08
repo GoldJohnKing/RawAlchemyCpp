@@ -11,7 +11,7 @@
  * value that is applied to the full image.
  */
 
-#include "raw_alchemy/common.h"
+#include "common.h"
 #include <string>
 #include <vector>
 

@@ -10,7 +10,7 @@
  * preserving bit-exact behavior for cross-validation.
  */
 
-#include "raw_alchemy/lut_applier.h"
+#include "lut_applier.h"
 
 #include <cstdio>
 #include <cstdlib>

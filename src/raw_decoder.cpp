@@ -23,7 +23,7 @@
  *   )
  */
 
-#include "raw_alchemy/raw_decoder.h"
+#include "raw_decoder.h"
 
 #include <libraw/libraw.h>
 #include <cstdio>

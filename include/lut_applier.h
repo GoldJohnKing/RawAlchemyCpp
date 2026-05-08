@@ -12,7 +12,7 @@
  * and 50% less memory access than trilinear.
  */
 
-#include "raw_alchemy/common.h"
+#include "common.h"
 #include <vector>
 #include <string>
 #include <array>

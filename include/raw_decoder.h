@@ -12,7 +12,7 @@
  *   highlight_mode=2 (blend), demosaic=AHD/AAHD
  */
 
-#include "raw_alchemy/common.h"
+#include "common.h"
 #include <string>
 
 namespace rawalchemy {

@@ -9,7 +9,7 @@
  *   - ZLIB compression with horizontal differencing predictor
  */
 
-#include "raw_alchemy/common.h"
+#include "common.h"
 #include <string>
 
 namespace rawalchemy {

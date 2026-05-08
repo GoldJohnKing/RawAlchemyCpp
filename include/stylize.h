@@ -8,7 +8,7 @@
  * the image for LUT conversion.
  */
 
-#include "raw_alchemy/common.h"
+#include "common.h"
 
 namespace rawalchemy {
 

@@ -11,7 +11,7 @@
  * Falls back to uncompressed if libtiff was built without ZLIB support.
  */
 
-#include "raw_alchemy/tiff_writer.h"
+#include "tiff_writer.h"
 
 #include <tiffio.h>
 #include <cstdio>

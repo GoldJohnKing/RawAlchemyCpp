@@ -13,7 +13,7 @@
  *   img = colour.cctf_encoding(img, function=logCurveName)
  */
 
-#include "raw_alchemy/log_transform.h"
+#include "log_transform.h"
 #include <cstdio>
 #include <algorithm>
 

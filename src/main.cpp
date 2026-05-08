@@ -6,13 +6,13 @@
  *           -> Log Gamut -> Log Curve -> [LUT] -> 16-bit TIFF
  */
 
-#include "raw_alchemy/raw_decoder.h"
-#include "raw_alchemy/metering.h"
-#include "raw_alchemy/stylize.h"
-#include "raw_alchemy/log_transform.h"
-#include "raw_alchemy/lut_applier.h"
-#include "raw_alchemy/tiff_writer.h"
-#include "raw_alchemy/jpeg_writer.h"
+#include "raw_decoder.h"
+#include "metering.h"
+#include "stylize.h"
+#include "log_transform.h"
+#include "lut_applier.h"
+#include "tiff_writer.h"
+#include "jpeg_writer.h"
 
 #include <cstdio>
 #include <cstdlib>
