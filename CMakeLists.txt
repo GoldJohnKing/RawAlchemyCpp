@@ -71,6 +71,10 @@ endif()
 add_library(raw_alchemy_lib STATIC
     src/raw_decoder.cpp
     src/tiff_writer.cpp
+    src/log_transform.cpp
+    src/lut_applier.cpp
+    src/metering.cpp
+    src/stylize.cpp
 )
 
 target_include_directories(raw_alchemy_lib PUBLIC
