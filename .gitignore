@@ -1,0 +1,29 @@
+# Build
+build/
+cmake-build-*/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files (keep test inputs, ignore outputs)
+*.tif
+*.tiff
+# But NOT the test input files
+!Test/*.NEF
+!Test/*.nef
+!Test/*.CR3
+!Test/*.ARW
+!Test/*.cube
+
+# Python cache
+__pycache__/
+*.pyc
+.venv/
