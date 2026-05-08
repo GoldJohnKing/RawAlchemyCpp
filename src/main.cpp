@@ -13,6 +13,7 @@
 #include "lut_applier.h"
 #include "tiff_writer.h"
 #include "jpeg_writer.h"
+#include "lens_correction.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -43,7 +44,7 @@ static void printUsage(const char* prog) {
         "Raw Alchemy C++\n"
         "===============\n"
         "\n"
-        "Pipeline: RAW -> ProPhoto Linear -> Exposure -> Sat/Cont -> Log -> LUT -> Image\n"
+        "Pipeline: RAW -> ProPhoto Linear -> [Lens Correction] -> Exposure -> Sat/Cont -> Log -> LUT -> Image\n"
         "\n"
         "Usage:\n"
         "  %s <input.raw> <output> --log-space <space> [options]\n"
@@ -60,6 +61,13 @@ static void printUsage(const char* prog) {
         "  --metering MODE    Auto metering mode (default: matrix)\n"
         "                     Modes: average, center-weighted, highlight-safe,\n"
         "                            hybrid, matrix\n"
+        "\n"
+        "Lens Correction:\n"
+        "  --lens-correction  Enable lens correction (default: enabled)\n"
+        "  --no-lens-correction\n"
+        "                     Disable lens correction\n"
+        "  --custom-lensfun-db PATH\n"
+        "                     Path to custom Lensfun XML database (file or directory)\n"
         "\n"
         "Options:\n"
         "  --lut FILE         Apply a .cube 3D LUT after log encoding\n"
@@ -89,6 +97,7 @@ int main(int argc, char* argv[]) {
     std::string lutPath;
     std::string meteringMode = "matrix";  // default
     std::string outputFormat;             // empty = auto-detect from extension
+    std::string customLensfunDb;          // empty = system default
     float  exposure   = 0.0f;
     bool   hasExposure = false;  // true only if --exposure explicitly given
     bool   halfSize    = false;
@@ -96,6 +105,7 @@ int main(int argc, char* argv[]) {
     bool   doBoost     = true;
     bool   compress    = true;
     bool   infoOnly    = false;
+    bool   lensCorrection = true;
     int    demosaicQ   = 3;
     int    jpegQuality  = 95;
     bool   jpegOptimize = false;
@@ -115,6 +125,9 @@ int main(int argc, char* argv[]) {
         else if (opt == "--jpeg-optimize")               { jpegOptimize = true; }
         else if (opt == "--info")                        { infoOnly = true; }
         else if (opt == "--demosaic" && i + 1 < argc)    { demosaicQ = std::atoi(argv[++i]); }
+        else if (opt == "--lens-correction")             { lensCorrection = true; }
+        else if (opt == "--no-lens-correction")          { lensCorrection = false; }
+        else if (opt == "--custom-lensfun-db" && i + 1 < argc) { customLensfunDb = argv[++i]; }
         else if (opt == "-h" || opt == "--help")         { printUsage(argv[0]); return 0; }
         else { fprintf(stderr, "Unknown option: %s\n", opt.c_str()); return 1; }
     }
@@ -168,6 +181,30 @@ int main(int argc, char* argv[]) {
                static_cast<double>(img.width * img.height) / 1e6,
                std::chrono::duration<double, std::milli>(t1 - t0).count());
         printf("\n");
+
+        // --- Step 1.5: Lens Correction ---
+        if (lensCorrection) {
+            printf("[Step 1.5] Lens Correction...\n");
+            auto tLC0 = std::chrono::high_resolution_clock::now();
+
+            rawalchemy::LensCorrectionParams lcParams;
+            lcParams.enabled = true;
+            lcParams.correctDistortion = true;
+            lcParams.correctTca = true;
+            lcParams.correctVignetting = true;
+            lcParams.distance = 1000.0f;
+            lcParams.customDbPath = customLensfunDb;
+
+            bool applied = rawalchemy::applyLensCorrection(img, meta, lcParams);
+
+            auto tLC1 = std::chrono::high_resolution_clock::now();
+            if (!applied) {
+                printf("  -> Skipped (lens not found or no correction data)\n");
+            }
+            printf("  -> Done in %.0f ms\n",
+                   std::chrono::duration<double, std::milli>(tLC1 - tLC0).count());
+            printf("\n");
+        }
 
         // --- Step 2: Exposure ---
         if (hasExposure) {

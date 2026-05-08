@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.18)
-project(RawAlchemyCpp
+project(raw_alchemy
     VERSION 0.1.0
     LANGUAGES C CXX
 )
@@ -94,8 +94,125 @@ add_dependencies(turbojpeg libjpeg-turbo_external)
 set(RA_LIBJPEG_TARGET turbojpeg)
 set(RA_LIBJPEG_SOURCE "submodule (libjpeg-turbo)")
 
+# ---- Lensfun (lens correction via Lensfun + GLib2 shim) ----
+# Compiled directly from submodule sources with a GLib2 compatibility shim.
+# No external GLib2 dependency — all GLib2 calls are replaced by C++17 equivalents
+# via a drop-in header + implementation that maps to std::string, std::filesystem,
+# std::mutex, std::vector, and pugixml (for XML parsing).
+option(ENABLE_LENS_CORRECTION "Enable lens correction via Lensfun library" ON)
+set(RA_LENSFUN_ENABLED OFF)
+
+if(ENABLE_LENS_CORRECTION)
+    # --- pugixml (XML parser, used by GLib2 shim for GMarkupParser bridge) ---
+    set(PUGIXML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    set(PUGIXML_INSTALL OFF CACHE BOOL "" FORCE)
+    add_subdirectory(third_party/pugixml)
+
+    # --- Generate Lensfun config.h ---
+    # Every Lensfun source file does #include "config.h" (14 files).
+    set(LENSFUN_VERSION "0.3.99.0")
+    set(LENSFUN_DB_VERSION "2")
+    include(CheckIncludeFiles)
+    CHECK_INCLUDE_FILES(endian.h HAVE_ENDIAN_H)
+
+    # Detect SSE support for x86
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "[XxIi][0-9]?86|[Aa][Mm][Dd]64")
+        set(VECTORIZATION_SSE 1)
+        set(VECTORIZATION_SSE2 1)
+    endif()
+
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lensfun_config/config.h.in
+        ${CMAKE_BINARY_DIR}/lensfun_generated/config.h @ONLY
+    )
+
+    # --- Generate lensfun.h from template ---
+    set(VERSION_MAJOR 0)
+    set(VERSION_MINOR 3)
+    set(VERSION_MICRO 99)
+    set(VERSION_BUGFIX 0)
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lensfun/include/lensfun/lensfun.h.in
+        ${CMAKE_BINARY_DIR}/lensfun_generated/lensfun/lensfun.h @ONLY
+    )
+
+    # --- GLib2 compatibility shim library ---
+    # Provides glib.h + glib/gstdio.h that Lensfun source files include.
+    # All implementations map GLib2 calls to C++17 standard library equivalents.
+    add_library(glib_shim STATIC
+        third_party/glib_shim/src/glib_shim.cpp
+    )
+    target_include_directories(glib_shim PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/glib_shim/include
+    )
+    target_link_libraries(glib_shim PUBLIC pugixml::pugixml)
+    target_compile_features(glib_shim PUBLIC cxx_std_17)
+    # std::mutex needs pthread on Linux
+    find_package(Threads)
+    if(Threads_FOUND)
+        target_link_libraries(glib_shim PUBLIC Threads::Threads)
+    endif()
+
+    # --- Lensfun source files (compiled directly into our project) ---
+    set(LENSFUN_SOURCES
+        third_party/lensfun/libs/lensfun/database.cpp
+        third_party/lensfun/libs/lensfun/auxfun.cpp
+        third_party/lensfun/libs/lensfun/camera.cpp
+        third_party/lensfun/libs/lensfun/lens.cpp
+        third_party/lensfun/libs/lensfun/mount.cpp
+        third_party/lensfun/libs/lensfun/modifier.cpp
+        third_party/lensfun/libs/lensfun/cpuid.cpp
+        third_party/lensfun/libs/lensfun/mod-color.cpp
+        third_party/lensfun/libs/lensfun/mod-color-sse.cpp
+        third_party/lensfun/libs/lensfun/mod-color-sse2.cpp
+        third_party/lensfun/libs/lensfun/mod-coord.cpp
+        third_party/lensfun/libs/lensfun/mod-coord-sse.cpp
+        third_party/lensfun/libs/lensfun/mod-pc.cpp
+        third_party/lensfun/libs/lensfun/mod-subpix.cpp
+    )
+
+    add_library(lensfun STATIC ${LENSFUN_SOURCES})
+
+    # Include path order matters for correct header resolution:
+    # 1. Generated config.h and lensfun.h (for #include "config.h" and #include "lensfun.h")
+    # 2. Lensfun source directory (for #include "lensfunprv.h")
+    # 3. GLib2 shim (for #include <glib.h> from lensfunprv.h) — resolved via glib_shim link
+    target_include_directories(lensfun PRIVATE
+        ${CMAKE_BINARY_DIR}/lensfun_generated
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lensfun/libs/lensfun
+    )
+    # GLib2 shim comes from linking glib_shim (its PUBLIC include dirs propagate)
+    target_link_libraries(lensfun PRIVATE glib_shim)
+
+    # Compile definitions for Lensfun
+    target_compile_definitions(lensfun PRIVATE CONF_LENSFUN_STATIC)
+
+    # SSE/SSE2 flags for x86 optimization
+    if(VECTORIZATION_SSE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(
+            third_party/lensfun/libs/lensfun/mod-color-sse.cpp
+            third_party/lensfun/libs/lensfun/mod-coord-sse.cpp
+            PROPERTIES COMPILE_FLAGS "-msse"
+        )
+    endif()
+    if(VECTORIZATION_SSE2 AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        set_source_files_properties(
+            third_party/lensfun/libs/lensfun/mod-color-sse2.cpp
+            PROPERTIES COMPILE_FLAGS "-msse2"
+        )
+    endif()
+
+    # Suppress warnings from Lensfun source (third-party code)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(lensfun PRIVATE -w)
+    endif()
+
+    set(RA_LENSFUN_ENABLED ON)
+    set(RA_LENSFUN_SOURCE "submodule (Lensfun 0.3.99 + GLib2 shim)")
+endif()
+
 # ---- Library target ----
-add_library(raw_alchemy_lib STATIC
+set(RA_LIBRARY_SOURCES
     src/raw_decoder.cpp
     src/tiff_writer.cpp
     src/jpeg_writer.cpp
@@ -103,43 +220,55 @@ add_library(raw_alchemy_lib STATIC
     src/lut_applier.cpp
     src/metering.cpp
     src/stylize.cpp
+    src/lens_correction.cpp
 )
 
-target_include_directories(raw_alchemy_lib PUBLIC
+add_library(raw_alchemy_core STATIC ${RA_LIBRARY_SOURCES})
+
+target_include_directories(raw_alchemy_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
-target_link_libraries(raw_alchemy_lib PUBLIC
+target_link_libraries(raw_alchemy_core PUBLIC
     ${RA_LIBRAW_TARGET}
     ${RA_LIBTIFF_TARGET}
     ${RA_LIBJPEG_TARGET}
 )
 
+# Lensfun linkage
+if(RA_LENSFUN_ENABLED)
+    target_compile_definitions(raw_alchemy_core PUBLIC RA_LENSFUN_ENABLED)
+    target_include_directories(raw_alchemy_core PUBLIC
+        ${CMAKE_BINARY_DIR}/lensfun_generated  # lensfun.h for public API
+    )
+    target_link_libraries(raw_alchemy_core PUBLIC lensfun)
+endif()
+
 # Link math library on Linux
 if(UNIX)
-    target_link_libraries(raw_alchemy_lib PUBLIC m)
+    target_link_libraries(raw_alchemy_core PUBLIC m)
 endif()
 
 # OpenMP for parallel processing (optional)
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
-    target_link_libraries(raw_alchemy_lib PUBLIC OpenMP::OpenMP_CXX)
-    target_compile_definitions(raw_alchemy_lib PUBLIC RA_USE_OPENMP)
+    target_link_libraries(raw_alchemy_core PUBLIC OpenMP::OpenMP_CXX)
+    target_compile_definitions(raw_alchemy_core PUBLIC RA_USE_OPENMP)
     message(STATUS "OpenMP enabled")
 endif()
 
 # ---- CLI executable ----
-add_executable(raw_alchemy src/main.cpp)
-target_link_libraries(raw_alchemy PRIVATE raw_alchemy_lib)
+add_executable(raw_alchemy_cli src/main.cpp)
+target_link_libraries(raw_alchemy_cli PRIVATE raw_alchemy_core)
 
 # ---- Verification tool ----
-add_executable(verify src/verify.cpp)
-target_link_libraries(verify PRIVATE raw_alchemy_lib)
+add_executable(raw_alchemy_verify src/verify.cpp)
+target_link_libraries(raw_alchemy_verify PRIVATE raw_alchemy_core)
 
 # ---- Compiler warnings ----
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(raw_alchemy_lib PRIVATE -Wall -Wextra -Wpedantic -O2)
-    target_compile_options(raw_alchemy PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O2)
+    target_compile_options(raw_alchemy_cli PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ---- Status ----
@@ -149,6 +278,10 @@ message(STATUS "  Version:    ${PROJECT_VERSION}")
 message(STATUS "  LibRaw:     ${RA_LIBRAW_SOURCE}")
 message(STATUS "  libtiff:    ${RA_LIBTIFF_SOURCE}")
 message(STATUS "  JPEG:       ${RA_LIBJPEG_SOURCE}")
+message(STATUS "  Lensfun:    ${RA_LENSFUN_ENABLED}")
+    if(RA_LENSFUN_ENABLED)
+        message(STATUS "             ${RA_LENSFUN_SOURCE}")
+    endif()
 message(STATUS "  OpenMP:     ${OpenMP_CXX_FOUND}")
 message(STATUS "=================================")
 message(STATUS "")

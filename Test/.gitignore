@@ -1,0 +1,9 @@
+# Ignore output files
+*.tif
+*.tiff
+*.JPG
+*.JPEG
+
+# Include input files
+!Test/Sample.NEF
+!Test/FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube
