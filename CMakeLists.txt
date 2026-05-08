@@ -8,180 +8,77 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# ---- Dependency Strategy ----
-option(USE_SYSTEM_LIBS "Use system-installed libraries instead of building from submodules" OFF)
+# ---- Dependencies (built from git submodules) ----
 
-# ---- LibRaw ----
-if(USE_SYSTEM_LIBS)
-    # System library discovery (original logic)
-    find_package(PkgConfig)
-    pkg_check_modules(LIBRAW IMPORTED_TARGET libraw>=0.20.0)
-    if(NOT LIBRAW_FOUND)
-        find_library(LIBRAW_LIBRARY NAMES raw raw_r
-            HINTS ${LIBRAW_ROOT}/lib ${LIBRAW_ROOT}/lib64 ${LIBRAW_ROOT})
-        find_path(LIBRAW_INCLUDE_DIR NAMES libraw/libraw.h
-            HINTS ${LIBRAW_ROOT}/include ${LIBRAW_ROOT})
-        if(LIBRAW_LIBRARY AND LIBRAW_INCLUDE_DIR)
-            set(LIBRAW_FOUND TRUE)
-            set(LIBRAW_LIBRARIES ${LIBRAW_LIBRARY})
-            set(LIBRAW_INCLUDE_DIRS ${LIBRAW_INCLUDE_DIR})
-        endif()
-    endif()
+# LibRaw via LibRaw-cmake wrapper
+set(LIBRAW_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/LibRaw" CACHE STRING "Path to LibRaw source")
+set(ENABLE_LCMS     OFF CACHE BOOL "" FORCE)
+set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(ENABLE_JASPER   OFF CACHE BOOL "" FORCE)
+set(ENABLE_RAWSPEED OFF CACHE BOOL "" FORCE)
+set(LIBRAW_INSTALL  OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/LibRaw-cmake)
 
-    if(NOT LIBRAW_FOUND)
-        message(FATAL_ERROR
-            "LibRaw not found. Install it via:\n"
-            "  Debian/Ubuntu: sudo apt install libraw-dev\n"
-            "  macOS:         brew install libraw\n"
-            "  Windows:       vcpkg install libraw\n"
-            "  Or build from source: cmake -DLIBRAW_ROOT=/path/to/libraw ..\n"
-        )
-    endif()
+set(RA_LIBRAW_TARGET libraw::libraw_r)
+set(RA_LIBRAW_SOURCE "submodule (LibRaw)")
 
-    # libtiff — system discovery
-    pkg_check_modules(LIBTIFF IMPORTED_TARGET libtiff-4)
-    if(NOT LIBTIFF_FOUND)
-        find_package(TIFF QUIET)
-        if(TIFF_FOUND)
-            set(LIBTIFF_FOUND TRUE)
-            set(LIBTIFF_LIBRARIES TIFF::TIFF)
-        else()
-            find_library(LIBTIFF_LIBRARY NAMES tiff libtiff
-                HINTS ${LIBTIFF_ROOT}/lib ${LIBTIFF_ROOT}/lib64 ${LIBTIFF_ROOT})
-            find_path(LIBTIFF_INCLUDE_DIR NAMES tiffio.h
-                HINTS ${LIBTIFF_ROOT}/include ${LIBTIFF_ROOT})
-            if(LIBTIFF_LIBRARY AND LIBTIFF_INCLUDE_DIR)
-                set(LIBTIFF_FOUND TRUE)
-                set(LIBTIFF_LIBRARIES ${LIBTIFF_LIBRARY})
-                set(LIBTIFF_INCLUDE_DIRS ${LIBTIFF_INCLUDE_DIR})
-            endif()
-        endif()
-    endif()
+# libtiff — minimal build
+set(tiff-tools      OFF CACHE BOOL "" FORCE)
+set(tiff-tests      OFF CACHE BOOL "" FORCE)
+set(tiff-contrib    OFF CACHE BOOL "" FORCE)
+set(tiff-docs       OFF CACHE BOOL "" FORCE)
+set(tiff-install    OFF CACHE BOOL "" FORCE)
+set(tiff-cxx        OFF CACHE BOOL "" FORCE)
+set(jpeg            OFF CACHE BOOL "" FORCE)
+set(jbig            OFF CACHE BOOL "" FORCE)
+set(lerc            OFF CACHE BOOL "" FORCE)
+set(lzma            OFF CACHE BOOL "" FORCE)
+set(zstd            OFF CACHE BOOL "" FORCE)
+set(webp            OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/libtiff)
 
-    if(NOT LIBTIFF_FOUND)
-        message(FATAL_ERROR
-            "libtiff not found. Install it via:\n"
-            "  Debian/Ubuntu: sudo apt install libtiff-dev\n"
-            "  macOS:         brew install libtiff\n"
-            "  Windows:       vcpkg install tiff\n"
-            "  Or build from source: cmake -DLIBTIFF_ROOT=/path/to/libtiff ..\n"
-        )
-    endif()
+set(RA_LIBTIFF_TARGET tiff)
+set(RA_LIBTIFF_SOURCE "submodule (libtiff)")
 
-    # libjpeg-turbo — system discovery
-    pkg_check_modules(LIBJPEG IMPORTED_TARGET libturbojpeg)
-    if(NOT LIBJPEG_FOUND)
-        find_package(JPEG QUIET)
-        if(JPEG_FOUND)
-            set(LIBJPEG_FOUND TRUE)
-            set(LIBJPEG_LIBRARIES JPEG::JPEG)
-        else()
-            find_library(LIBJPEG_LIBRARY NAMES turbojpeg jpeg
-                HINTS ${LIBJPEG_ROOT}/lib ${LIBJPEG_ROOT}/lib64 ${LIBJPEG_ROOT})
-            find_path(LIBJPEG_INCLUDE_DIR NAMES turbojpeg.h
-                HINTS ${LIBJPEG_ROOT}/include ${LIBJPEG_ROOT})
-            if(LIBJPEG_LIBRARY AND LIBJPEG_INCLUDE_DIR)
-                set(LIBJPEG_FOUND TRUE)
-                set(LIBJPEG_LIBRARIES ${LIBJPEG_LIBRARY})
-                set(LIBJPEG_INCLUDE_DIRS ${LIBJPEG_INCLUDE_DIR})
-            endif()
-        endif()
-    endif()
+# libjpeg-turbo — build from submodule via ExternalProject
+include(ExternalProject)
 
-    if(NOT LIBJPEG_FOUND)
-        message(FATAL_ERROR
-            "libjpeg-turbo not found. Install it via:\n"
-            "  Debian/Ubuntu: sudo apt install libturbojpeg-dev\n"
-            "  macOS:         brew install jpeg-turbo\n"
-            "  Windows:       vcpkg install libjpeg-turbo\n"
-            "  Or build from source: cmake -DLIBJPEG_ROOT=/path/to/libjpeg-turbo ..\n"
-        )
-    endif()
+set(LIBJPEG_TURBO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjpeg-turbo")
+set(LIBJPEG_TURBO_BUILD "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo")
+set(LIBJPEG_TURBO_INSTALL "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo-install")
 
-    # Set aliases for uniform target-based linking
-    set(RA_LIBRAW_TARGET ${LIBRAW_LIBRARIES})
-    set(RA_LIBTIFF_TARGET ${LIBTIFF_LIBRARIES})
-    set(RA_LIBJPEG_TARGET ${LIBJPEG_LIBRARIES})
-    set(RA_LIBRAW_SOURCE "system (${LIBRAW_INCLUDE_DIRS})")
-    set(RA_LIBTIFF_SOURCE "system (${LIBTIFF_INCLUDE_DIRS})")
-    set(RA_LIBJPEG_SOURCE "system (${LIBJPEG_INCLUDE_DIRS})")
+# Create the include directory so CMake doesn't complain about non-existent paths
+file(MAKE_DIRECTORY ${LIBJPEG_TURBO_INSTALL}/include)
 
-else()
-    # ---- Build from submodules ----
+ExternalProject_Add(libjpeg-turbo_external
+    SOURCE_DIR   ${LIBJPEG_TURBO_SRC}
+    BINARY_DIR   ${LIBJPEG_TURBO_BUILD}
+    INSTALL_DIR  ${LIBJPEG_TURBO_INSTALL}
+    CMAKE_ARGS
+        -DCMAKE_INSTALL_PREFIX=${LIBJPEG_TURBO_INSTALL}
+        -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+        -DENABLE_SHARED=OFF
+        -DENABLE_STATIC=ON
+        -DWITH_SIMD=ON
+        -DWITH_ARITH_DEC=OFF
+        -DWITH_ARITH_ENC=OFF
+        -DWITH_JAVA=OFF
+        -DWITH_JPEG8=OFF
+        -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+        -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+    BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
+)
 
-    # LibRaw via LibRaw-cmake wrapper
-    set(LIBRAW_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/LibRaw" CACHE STRING "Path to LibRaw source")
-    set(ENABLE_LCMS     OFF CACHE BOOL "" FORCE)
-    set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(ENABLE_JASPER   OFF CACHE BOOL "" FORCE)
-    set(ENABLE_RAWSPEED OFF CACHE BOOL "" FORCE)
-    set(LIBRAW_INSTALL  OFF CACHE BOOL "" FORCE)
-    add_subdirectory(third_party/LibRaw-cmake)
+# Create an imported static library target for libjpeg-turbo
+add_library(turbojpeg STATIC IMPORTED GLOBAL)
+set_target_properties(turbojpeg PROPERTIES
+    IMPORTED_LOCATION ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
+    INTERFACE_INCLUDE_DIRECTORIES ${LIBJPEG_TURBO_INSTALL}/include
+)
+add_dependencies(turbojpeg libjpeg-turbo_external)
 
-    set(RA_LIBRAW_TARGET libraw::libraw_r)
-    set(RA_LIBRAW_SOURCE "submodule (LibRaw)")
-
-    # libtiff — minimal build
-    set(tiff-tools      OFF CACHE BOOL "" FORCE)
-    set(tiff-tests      OFF CACHE BOOL "" FORCE)
-    set(tiff-contrib    OFF CACHE BOOL "" FORCE)
-    set(tiff-docs       OFF CACHE BOOL "" FORCE)
-    set(tiff-install    OFF CACHE BOOL "" FORCE)
-    set(tiff-cxx        OFF CACHE BOOL "" FORCE)
-    set(jpeg            OFF CACHE BOOL "" FORCE)
-    set(jbig            OFF CACHE BOOL "" FORCE)
-    set(lerc            OFF CACHE BOOL "" FORCE)
-    set(lzma            OFF CACHE BOOL "" FORCE)
-    set(zstd            OFF CACHE BOOL "" FORCE)
-    set(webp            OFF CACHE BOOL "" FORCE)
-    add_subdirectory(third_party/libtiff)
-
-    set(RA_LIBTIFF_TARGET tiff)
-    set(RA_LIBTIFF_SOURCE "submodule (libtiff)")
-
-    # libjpeg-turbo — build from submodule via ExternalProject
-    include(ExternalProject)
-
-    set(LIBJPEG_TURBO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjpeg-turbo")
-    set(LIBJPEG_TURBO_BUILD "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo")
-    set(LIBJPEG_TURBO_INSTALL "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo-install")
-
-    # Create the include directory so CMake doesn't complain about non-existent paths
-    file(MAKE_DIRECTORY ${LIBJPEG_TURBO_INSTALL}/include)
-
-    ExternalProject_Add(libjpeg-turbo_external
-        SOURCE_DIR   ${LIBJPEG_TURBO_SRC}
-        BINARY_DIR   ${LIBJPEG_TURBO_BUILD}
-        INSTALL_DIR  ${LIBJPEG_TURBO_INSTALL}
-        CMAKE_ARGS
-            -DCMAKE_INSTALL_PREFIX=${LIBJPEG_TURBO_INSTALL}
-            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
-            -DENABLE_SHARED=OFF
-            -DENABLE_STATIC=ON
-            -DWITH_SIMD=ON
-            -DWITH_ARITH_DEC=OFF
-            -DWITH_ARITH_ENC=OFF
-            -DWITH_JAVA=OFF
-            -DWITH_JPEG8=OFF
-            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
-            -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
-        BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
-    )
-
-    # Create an imported static library target for libjpeg-turbo
-    add_library(turbojpeg STATIC IMPORTED GLOBAL)
-    set_target_properties(turbojpeg PROPERTIES
-        IMPORTED_LOCATION ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
-        INTERFACE_INCLUDE_DIRECTORIES ${LIBJPEG_TURBO_INSTALL}/include
-    )
-    add_dependencies(turbojpeg libjpeg-turbo_external)
-
-    set(RA_LIBJPEG_TARGET turbojpeg)
-    set(RA_LIBJPEG_SOURCE "submodule (libjpeg-turbo)")
-
-endif()
-
-# libjpeg-turbo provides JPEG encoding via its C API (turbojpeg)
+set(RA_LIBJPEG_TARGET turbojpeg)
+set(RA_LIBJPEG_SOURCE "submodule (libjpeg-turbo)")
 
 # ---- Library target ----
 add_library(raw_alchemy_lib STATIC
