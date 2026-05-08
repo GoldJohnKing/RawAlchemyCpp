@@ -12,6 +12,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # LibRaw via LibRaw-cmake wrapper
 set(LIBRAW_PATH "${CMAKE_CURRENT_SOURCE_DIR}/third_party/LibRaw" CACHE STRING "Path to LibRaw source")
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(ENABLE_LCMS     OFF CACHE BOOL "" FORCE)
 set(ENABLE_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(ENABLE_JASPER   OFF CACHE BOOL "" FORCE)
@@ -22,19 +23,29 @@ add_subdirectory(third_party/LibRaw-cmake)
 set(RA_LIBRAW_TARGET libraw::libraw_r)
 set(RA_LIBRAW_SOURCE "submodule (LibRaw)")
 
-# libtiff — minimal build
+# libtiff — minimal build (uncompressed 16-bit TIFF output only)
+set(BUILD_SHARED_LIBS  OFF CACHE BOOL "" FORCE)
 set(tiff-tools      OFF CACHE BOOL "" FORCE)
 set(tiff-tests      OFF CACHE BOOL "" FORCE)
 set(tiff-contrib    OFF CACHE BOOL "" FORCE)
 set(tiff-docs       OFF CACHE BOOL "" FORCE)
 set(tiff-install    OFF CACHE BOOL "" FORCE)
 set(tiff-cxx        OFF CACHE BOOL "" FORCE)
+set(tiff-opengl     OFF CACHE BOOL "" FORCE)
 set(jpeg            OFF CACHE BOOL "" FORCE)
 set(jbig            OFF CACHE BOOL "" FORCE)
 set(lerc            OFF CACHE BOOL "" FORCE)
 set(lzma            OFF CACHE BOOL "" FORCE)
 set(zstd            OFF CACHE BOOL "" FORCE)
 set(webp            OFF CACHE BOOL "" FORCE)
+set(zlib            OFF CACHE BOOL "" FORCE)
+set(ccitt           OFF CACHE BOOL "" FORCE)
+set(packbits        OFF CACHE BOOL "" FORCE)
+set(lzw             OFF CACHE BOOL "" FORCE)
+set(thunder         OFF CACHE BOOL "" FORCE)
+set(next            OFF CACHE BOOL "" FORCE)
+set(logluv          OFF CACHE BOOL "" FORCE)
+set(mdi             OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/libtiff)
 
 set(RA_LIBTIFF_TARGET tiff)
@@ -63,7 +74,10 @@ ExternalProject_Add(libjpeg-turbo_external
         -DWITH_ARITH_DEC=OFF
         -DWITH_ARITH_ENC=OFF
         -DWITH_JAVA=OFF
+        -DWITH_JPEG7=OFF
         -DWITH_JPEG8=OFF
+        -DWITH_TOOLS=OFF
+        -DWITH_TESTS=OFF
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
         -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
     BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
