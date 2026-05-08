@@ -7,7 +7,9 @@
  *   - 8-bit unsigned integer output (float32 * 255, clamped)
  *   - Quality 95
  *   - No chroma subsampling (4:4:4)
- *   - Huffman optimization enabled
+ *   - Accurate DCT for best quality
+ *
+ * Uses libjpeg-turbo (TurboJPEG API) for fast, high-quality JPEG encoding.
  */
 
 #include "raw_alchemy/common.h"

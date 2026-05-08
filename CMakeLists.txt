@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
 project(RawAlchemy
     VERSION 0.1.0
-    LANGUAGES CXX
+    LANGUAGES C CXX
 )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -68,11 +68,43 @@ if(USE_SYSTEM_LIBS)
         )
     endif()
 
+    # libjpeg-turbo — system discovery
+    pkg_check_modules(LIBJPEG IMPORTED_TARGET libturbojpeg)
+    if(NOT LIBJPEG_FOUND)
+        find_package(JPEG QUIET)
+        if(JPEG_FOUND)
+            set(LIBJPEG_FOUND TRUE)
+            set(LIBJPEG_LIBRARIES JPEG::JPEG)
+        else()
+            find_library(LIBJPEG_LIBRARY NAMES turbojpeg jpeg
+                HINTS ${LIBJPEG_ROOT}/lib ${LIBJPEG_ROOT}/lib64 ${LIBJPEG_ROOT})
+            find_path(LIBJPEG_INCLUDE_DIR NAMES turbojpeg.h
+                HINTS ${LIBJPEG_ROOT}/include ${LIBJPEG_ROOT})
+            if(LIBJPEG_LIBRARY AND LIBJPEG_INCLUDE_DIR)
+                set(LIBJPEG_FOUND TRUE)
+                set(LIBJPEG_LIBRARIES ${LIBJPEG_LIBRARY})
+                set(LIBJPEG_INCLUDE_DIRS ${LIBJPEG_INCLUDE_DIR})
+            endif()
+        endif()
+    endif()
+
+    if(NOT LIBJPEG_FOUND)
+        message(FATAL_ERROR
+            "libjpeg-turbo not found. Install it via:\n"
+            "  Debian/Ubuntu: sudo apt install libturbojpeg-dev\n"
+            "  macOS:         brew install jpeg-turbo\n"
+            "  Windows:       vcpkg install libjpeg-turbo\n"
+            "  Or build from source: cmake -DLIBJPEG_ROOT=/path/to/libjpeg-turbo ..\n"
+        )
+    endif()
+
     # Set aliases for uniform target-based linking
     set(RA_LIBRAW_TARGET ${LIBRAW_LIBRARIES})
     set(RA_LIBTIFF_TARGET ${LIBTIFF_LIBRARIES})
+    set(RA_LIBJPEG_TARGET ${LIBJPEG_LIBRARIES})
     set(RA_LIBRAW_SOURCE "system (${LIBRAW_INCLUDE_DIRS})")
     set(RA_LIBTIFF_SOURCE "system (${LIBTIFF_INCLUDE_DIRS})")
+    set(RA_LIBJPEG_SOURCE "system (${LIBJPEG_INCLUDE_DIRS})")
 
 else()
     # ---- Build from submodules ----
@@ -107,10 +139,49 @@ else()
     set(RA_LIBTIFF_TARGET tiff)
     set(RA_LIBTIFF_SOURCE "submodule (libtiff)")
 
+    # libjpeg-turbo — build from submodule via ExternalProject
+    include(ExternalProject)
+
+    set(LIBJPEG_TURBO_SRC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjpeg-turbo")
+    set(LIBJPEG_TURBO_BUILD "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo")
+    set(LIBJPEG_TURBO_INSTALL "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo-install")
+
+    # Create the include directory so CMake doesn't complain about non-existent paths
+    file(MAKE_DIRECTORY ${LIBJPEG_TURBO_INSTALL}/include)
+
+    ExternalProject_Add(libjpeg-turbo_external
+        SOURCE_DIR   ${LIBJPEG_TURBO_SRC}
+        BINARY_DIR   ${LIBJPEG_TURBO_BUILD}
+        INSTALL_DIR  ${LIBJPEG_TURBO_INSTALL}
+        CMAKE_ARGS
+            -DCMAKE_INSTALL_PREFIX=${LIBJPEG_TURBO_INSTALL}
+            -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
+            -DENABLE_SHARED=OFF
+            -DENABLE_STATIC=ON
+            -DWITH_SIMD=ON
+            -DWITH_ARITH_DEC=OFF
+            -DWITH_ARITH_ENC=OFF
+            -DWITH_JAVA=OFF
+            -DWITH_JPEG8=OFF
+            -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
+            -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+        BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
+    )
+
+    # Create an imported static library target for libjpeg-turbo
+    add_library(turbojpeg STATIC IMPORTED GLOBAL)
+    set_target_properties(turbojpeg PROPERTIES
+        IMPORTED_LOCATION ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
+        INTERFACE_INCLUDE_DIRECTORIES ${LIBJPEG_TURBO_INSTALL}/include
+    )
+    add_dependencies(turbojpeg libjpeg-turbo_external)
+
+    set(RA_LIBJPEG_TARGET turbojpeg)
+    set(RA_LIBJPEG_SOURCE "submodule (libjpeg-turbo)")
+
 endif()
 
-# libjpeg is NOT required — JPEG output uses stb_image_write (header-only, bundled)
-# See vendor/stb_image_write.h
+# libjpeg-turbo provides JPEG encoding via its C API (turbojpeg)
 
 # ---- Library target ----
 add_library(raw_alchemy_lib STATIC
@@ -125,12 +196,12 @@ add_library(raw_alchemy_lib STATIC
 
 target_include_directories(raw_alchemy_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
 
 target_link_libraries(raw_alchemy_lib PUBLIC
     ${RA_LIBRAW_TARGET}
     ${RA_LIBTIFF_TARGET}
+    ${RA_LIBJPEG_TARGET}
 )
 
 # Link math library on Linux
@@ -166,7 +237,7 @@ message(STATUS "=== Raw Alchemy (C++ Edition) ===")
 message(STATUS "  Version:    ${PROJECT_VERSION}")
 message(STATUS "  LibRaw:     ${RA_LIBRAW_SOURCE}")
 message(STATUS "  libtiff:    ${RA_LIBTIFF_SOURCE}")
-message(STATUS "  JPEG:       stb_image_write (bundled)")
+message(STATUS "  JPEG:       ${RA_LIBJPEG_SOURCE}")
 message(STATUS "  OpenMP:     ${OpenMP_CXX_FOUND}")
 message(STATUS "=================================")
 message(STATUS "")
