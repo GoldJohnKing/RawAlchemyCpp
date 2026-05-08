@@ -12,6 +12,7 @@
 #include "raw_alchemy/log_transform.h"
 #include "raw_alchemy/lut_applier.h"
 #include "raw_alchemy/tiff_writer.h"
+#include "raw_alchemy/jpeg_writer.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -42,10 +43,13 @@ static void printUsage(const char* prog) {
         "Raw Alchemy C++\n"
         "===============\n"
         "\n"
-        "Pipeline: RAW -> ProPhoto Linear -> Exposure -> Sat/Cont -> Log -> LUT -> TIFF\n"
+        "Pipeline: RAW -> ProPhoto Linear -> Exposure -> Sat/Cont -> Log -> LUT -> Image\n"
         "\n"
         "Usage:\n"
-        "  %s <input.raw> <output.tif> --log-space <space> [options]\n"
+        "  %s <input.raw> <output> --log-space <space> [options]\n"
+        "\n"
+        "  Output format is auto-detected from file extension (.tif/.tiff/.jpg/.jpeg)\n"
+        "  or can be set explicitly with --format.\n"
         "\n"
         "Log Spaces: F-Log, F-Log2, F-Log2C, V-Log, N-Log, L-Log,\n"
         "            Canon Log 2, Canon Log 3, S-Log3, S-Log3.Cine,\n"
@@ -59,11 +63,13 @@ static void printUsage(const char* prog) {
         "\n"
         "Options:\n"
         "  --lut FILE         Apply a .cube 3D LUT after log encoding\n"
+        "  --format FMT       Output format: tif, jpg (default: auto from extension)\n"
         "  --no-boost         Disable saturation/contrast boost\n"
         "  --half-size        Decode at half resolution (fast preview)\n"
         "  --no-camera-wb     Don't use camera white balance\n"
         "  --demosaic N       Demosaic: 3=AHD (default), 11=AAHD\n"
         "  --no-compress      Save TIFF without compression\n"
+        "  --jpeg-quality N   JPEG quality 1-100 (default: 95)\n"
         "  --info             Only print metadata\n"
         "  -h, --help         Show this help\n"
         "\n",
@@ -81,6 +87,7 @@ int main(int argc, char* argv[]) {
     std::string logSpace;
     std::string lutPath;
     std::string meteringMode = "matrix";  // default
+    std::string outputFormat;             // empty = auto-detect from extension
     float  exposure   = 0.0f;
     bool   hasExposure = false;  // true only if --exposure explicitly given
     bool   halfSize    = false;
@@ -89,6 +96,7 @@ int main(int argc, char* argv[]) {
     bool   compress    = true;
     bool   infoOnly    = false;
     int    demosaicQ   = 3;
+    int    jpegQuality = 95;
 
     for (int i = 3; i < argc; ++i) {
         std::string opt = argv[i];
@@ -96,10 +104,12 @@ int main(int argc, char* argv[]) {
         else if (opt == "--lut" && i + 1 < argc)        { lutPath = argv[++i]; }
         else if (opt == "--metering" && i + 1 < argc)    { meteringMode = argv[++i]; }
         else if (opt == "--exposure" && i + 1 < argc)    { exposure = std::strtof(argv[++i], nullptr); hasExposure = true; }
+        else if (opt == "--format" && i + 1 < argc)      { outputFormat = argv[++i]; }
         else if (opt == "--half-size")                   { halfSize = true; }
         else if (opt == "--no-camera-wb")                { useCameraWb = false; }
         else if (opt == "--no-boost")                    { doBoost = false; }
         else if (opt == "--no-compress")                 { compress = false; }
+        else if (opt == "--jpeg-quality" && i + 1 < argc){ jpegQuality = std::atoi(argv[++i]); }
         else if (opt == "--info")                        { infoOnly = true; }
         else if (opt == "--demosaic" && i + 1 < argc)    { demosaicQ = std::atoi(argv[++i]); }
         else if (opt == "-h" || opt == "--help")         { printUsage(argv[0]); return 0; }
@@ -203,12 +213,50 @@ int main(int argc, char* argv[]) {
             printf("\n");
         }
 
+        // --- Determine output format ---
+        // Auto-detect from file extension if --format not specified
+        // Matches Python's file_io.save_image() behavior: dispatch by extension
+        enum class OutFormat { Tiff, Jpeg };
+        OutFormat fmt = OutFormat::Tiff;  // default
+
+        if (!outputFormat.empty()) {
+            // Explicit --format override
+            if (outputFormat == "jpg" || outputFormat == "jpeg") {
+                fmt = OutFormat::Jpeg;
+            } else if (outputFormat == "tif" || outputFormat == "tiff") {
+                fmt = OutFormat::Tiff;
+            } else {
+                fprintf(stderr, "Error: Unsupported format '%s' (use: tif, jpg)\n", outputFormat.c_str());
+                return 1;
+            }
+        } else {
+            // Auto-detect from output path extension
+            std::string ext = outputPath;
+            for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (ext.size() >= 4 && ext.compare(ext.size() - 4, 4, ".jpg") == 0)
+                fmt = OutFormat::Jpeg;
+            else if (ext.size() >= 5 && ext.compare(ext.size() - 5, 5, ".jpeg") == 0)
+                fmt = OutFormat::Jpeg;
+        }
+
         // --- Save ---
-        printf("[Save] 16-bit TIFF (%s)...\n", compress ? "ZLIB" : "Uncompressed");
+        bool ok = false;
         auto tS0 = std::chrono::high_resolution_clock::now();
-        bool ok = compress
-            ? rawalchemy::writeTiff16(img, outputPath)
-            : rawalchemy::writeTiff16Uncompressed(img, outputPath);
+
+        switch (fmt) {
+        case OutFormat::Tiff:
+            printf("[Save] 16-bit TIFF (%s)...\n", compress ? "ZLIB" : "Uncompressed");
+            ok = compress
+                ? rawalchemy::writeTiff16(img, outputPath)
+                : rawalchemy::writeTiff16Uncompressed(img, outputPath);
+            break;
+
+        case OutFormat::Jpeg:
+            printf("[Save] 8-bit JPEG (quality=%d, 4:4:4)...\n", jpegQuality);
+            ok = rawalchemy::writeJpeg(img, outputPath, jpegQuality);
+            break;
+        }
+
         auto tS1 = std::chrono::high_resolution_clock::now();
         if (!ok) { fprintf(stderr, "Error: Failed to write output.\n"); return 1; }
         printf("  -> Done in %.0f ms\n",

@@ -67,10 +67,14 @@ if(NOT LIBTIFF_FOUND)
     )
 endif()
 
+# libjpeg is NOT required — JPEG output uses stb_image_write (header-only, bundled)
+# See vendor/stb_image_write.h
+
 # ---- Library target (for future integration) ----
 add_library(raw_alchemy_lib STATIC
     src/raw_decoder.cpp
     src/tiff_writer.cpp
+    src/jpeg_writer.cpp
     src/log_transform.cpp
     src/lut_applier.cpp
     src/metering.cpp
@@ -79,6 +83,7 @@ add_library(raw_alchemy_lib STATIC
 
 target_include_directories(raw_alchemy_lib PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/vendor
     ${LIBRAW_INCLUDE_DIRS}
     ${LIBTIFF_INCLUDE_DIRS}
 )
@@ -121,6 +126,7 @@ message(STATUS "=== Raw Alchemy (C++ Edition) ===")
 message(STATUS "  Version:    ${PROJECT_VERSION}")
 message(STATUS "  LibRaw:     ${LIBRAW_INCLUDE_DIRS}")
 message(STATUS "  libtiff:    ${LIBTIFF_INCLUDE_DIRS}")
+message(STATUS "  JPEG:       stb_image_write (bundled)")
 message(STATUS "  OpenMP:     ${OpenMP_CXX_FOUND}")
 message(STATUS "=================================")
 message(STATUS "")
