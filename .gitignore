@@ -1,5 +1,7 @@
 # Build
 build/
+build-windows-dll/
+build-android-*/
 cmake-build-*/
 
 # IDE
