@@ -205,7 +205,6 @@ RawAlchemyCpp/
 │   ├── cross_validate_jpeg.py      #   JPEG 全管线对比验证
 │   ├── cross_validate_lens.py      #   镜头校正效果验证
 │   ├── Sample.NEF                  #   测试 RAW 文件 (Nikon NEF)
-│   ├── Result_ACR.JPG              #   Adobe Camera Raw 参考输出
 │   └── FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube  #   测试用 3D LUT
 │
 └── third_party/                    # 第三方依赖 (git 子模块 + 自定义)
