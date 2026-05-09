@@ -168,6 +168,81 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
     return RA_OK;
 }
 
+RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
+                            const rawalchemy::CameraMetadata& meta,
+                            const char* logSpace,
+                            const rawalchemy::LUT3D* lut,
+                            const char* metering,
+                            float manualEv,
+                            int useAutoExposure,
+                            int enableLensCorrection,
+                            const char* customLensfunDb) {
+    // Lens correction
+    if (enableLensCorrection) {
+        try {
+            rawalchemy::LensCorrectionParams lcParams;
+            lcParams.enabled = true;
+            lcParams.correctDistortion = true;
+            lcParams.correctTca = true;
+            lcParams.correctVignetting = true;
+            lcParams.distance = 1000.0f;
+            if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
+            rawalchemy::applyLensCorrection(img, meta, lcParams);
+        } catch (...) {
+            return catchExceptions("lens correction");
+        }
+    }
+
+    // Exposure
+    try {
+        if (useAutoExposure) {
+            std::string mode(metering ? metering : "matrix");
+            if (!rawalchemy::isMeteringModeSupported(mode)) {
+                setError(std::string("Unsupported metering mode: ") + mode);
+                return RA_ERR_INVALID_PARAM;
+            }
+            float gain = rawalchemy::computeAutoGain(img, mode);
+            img.applyGain(gain);
+        } else {
+            img.applyGain(std::pow(2.0f, manualEv));
+        }
+    } catch (...) {
+        return catchExceptions("exposure");
+    }
+
+    // Saturation / Contrast boost
+    try {
+        rawalchemy::applySaturationContrast(img, 1.25f, 1.10f);
+    } catch (...) {
+        return catchExceptions("saturation/contrast");
+    }
+
+    // Log transform
+    if (logSpace) {
+        try {
+            std::string space(logSpace);
+            if (!rawalchemy::isLogSpaceSupported(space)) {
+                setError(std::string("Unsupported log space: ") + logSpace);
+                return RA_ERR_LOG_UNSUPPORTED;
+            }
+            rawalchemy::applyLogTransform(img, space);
+        } catch (...) {
+            return catchExceptions("log transform");
+        }
+    }
+
+    // LUT — use pre-parsed data directly
+    if (lut && !lut->empty()) {
+        try {
+            rawalchemy::applyLUT3D(img, *lut);
+        } catch (...) {
+            return catchExceptions("LUT");
+        }
+    }
+
+    return RA_OK;
+}
+
 } // anonymous namespace
 
 // ----------------------------------------------------------------
@@ -226,6 +301,78 @@ RA_API RaResult RA_CALL raProcessFile(
         return RA_OK;
     } catch (...) {
         return catchExceptions("raProcessFile");
+    }
+}
+
+RA_API RaResult RA_CALL raProcessFileWithLUT(
+    const char* inputPath,
+    const char* outputPath,
+    const char* logSpace,
+    const float* lutTable,
+    int         lutSize,
+    const float* lutDomainMin,
+    const float* lutDomainMax,
+    const char* metering,
+    float       manualEv,
+    int         useAutoExposure,
+    int         jpegQuality,
+    int         enableLensCorrection,
+    const char* customLensfunDb
+) {
+    if (!inputPath || !outputPath) {
+        setError("raProcessFileWithLUT: null path parameter");
+        return RA_ERR_INVALID_PARAM;
+    }
+    clearError();
+
+    try {
+        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        auto meta = rawalchemy::extractMetadata(std::string(inputPath));
+
+        rawalchemy::LUT3D lut;
+        const rawalchemy::LUT3D* lutPtr = nullptr;
+        if (lutTable && lutSize > 0) {
+            lut.size = lutSize;
+            int totalFloats = lutSize * lutSize * lutSize * 3;
+            lut.table.assign(lutTable, lutTable + totalFloats);
+            if (lutDomainMin) {
+                lut.domainMin[0] = lutDomainMin[0];
+                lut.domainMin[1] = lutDomainMin[1];
+                lut.domainMin[2] = lutDomainMin[2];
+            }
+            if (lutDomainMax) {
+                lut.domainMax[0] = lutDomainMax[0];
+                lut.domainMax[1] = lutDomainMax[1];
+                lut.domainMax[2] = lutDomainMax[2];
+            }
+            lutPtr = &lut;
+        }
+
+        RaResult res = runPipelineWithLUT(img, meta, logSpace, lutPtr, metering,
+                                   manualEv, useAutoExposure,
+                                   enableLensCorrection, customLensfunDb);
+        if (res != RA_OK) return res;
+
+        std::string ext = outputPath;
+        for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+
+        bool isJpeg = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
+                      (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
+
+        bool ok;
+        if (isJpeg) {
+            ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false);
+        } else {
+            ok = rawalchemy::writeTiff16(img, std::string(outputPath));
+        }
+
+        if (!ok) {
+            setError("Failed to write output file");
+            return RA_ERR_WRITE_FAILED;
+        }
+        return RA_OK;
+    } catch (...) {
+        return catchExceptions("raProcessFileWithLUT");
     }
 }
 
