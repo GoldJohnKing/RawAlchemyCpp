@@ -25,7 +25,7 @@ The core design, processing pipeline, color science algorithms, and metering str
 | RAW 文件解码 / RAW decoding | rawpy (LibRaw bindings) | LibRaw (直接调用 C API) |
 | 色域变换 / Gamut transform | colour-science 库 | 预计算 constexpr 3×3 矩阵 (colour-science 离线生成) |
 | Log 曲线编码 / Log curve encoding | colour-science `cctf_encoding()` | 内联分段函数 (switch-case, 零开销) |
-| 3D LUT 插值 / 3D LUT interpolation | Numba JIT 四面体插值 | C++ 四面体插值 + OpenMP 并行 |
+| 3D LUT 插值 / 3D LUT interpolation | Numba JIT 四面体插值 | C++ 四面体插值 + OpenMP 并行 (ARM64: float16 中间格式优化带宽) |
 | 镜头校正 / Lens correction | ctypes 调用 Lensfun 共享库 | 直接编译 Lensfun 源码 + GLib2 shim |
 | 自动曝光测光 / Auto exposure metering | 5 种策略 (Protocol 模式) | 5 种策略 (函数重载 + 子采样) |
 | EXIF 元数据嵌入 / EXIF embedding | Pillow 保留 EXIF | LibRaw 回调提取 + libexif 序列化嵌入 JPEG |
@@ -62,7 +62,7 @@ The core design, processing pipeline, color science algorithms, and metering str
 | **矩阵变换** | NumPy 扁平化 + 展开乘法 | 逐像素内联 3×3 乘法 |
 | **LUT 查找** | Numba 四面体插值 | 相同算法，C++ 原生实现 |
 | **镜头校正重采样** | SciPy `map_coordinates` (双三次) | 手写 Catmull-Rom 双三次插值 (4×4 核) |
-| **内存布局** | NumPy ndarray (H×W×3) | `std::vector<float>` 平铺存储 (W×H×3) |
+| **内存布局** | NumPy ndarray (H×W×3) | `std::vector<float>` 平铺存储 (W×H×3)；ARM64 可选 `std::vector<uint16_t>` float16 中间缓冲 (带宽减半) |
 
 #### 3. 镜头校正集成方式
 
@@ -115,12 +115,27 @@ RAW 文件
 [步骤 3] 相机匹配增强 ── applySaturationContrast()
   │         饱和度 (×1.25) + 对比度 (×1.10)
   ▼
-[步骤 4] Log 信号准备 ── applyLogTransform()  [可选]
-  │         4a: 色域变换 (ProPhoto → 目标色域, 3×3 矩阵)
-  │         4b: Log 曲线编码 (线性 → Log OETF)
+[步骤 4] 色域变换 ────── applyGamutTransform()  [可选]
+  │         ProPhoto → 目标色域, 3×3 矩阵 (float32)
   ▼
-[步骤 5] 3D LUT 应用 (可选)  loadCubeLUT() + applyLUT3D()
-  │         四面体插值 (6-case, 每像素仅读 4 顶点)
+  ├─ ARM64 路径 (float16 带宽优化) ──────────────────────────┐
+  │   [步骤 4b] convertToF16()                                │
+  │   │         float32 → float16 (NEON vcvt_f16_f32)         │
+  │   ▼                                                       │
+  │   [步骤 4c] applyLogEncodingF16()                         │
+  │   │         Log 曲线编码 (float16 I/O, float32 计算)       │
+  │   ▼                                                       │
+  │   [步骤 5]  applyLUT3DF16() (可选)                        │
+  │   │         四面体插值 (float16 I/O, float32 LUT)          │
+  │   ▼                                                       │
+  │   convertToF32() → 恢复 float32                           │
+  │                                                           │
+  └─ 通用路径 (float32) ──────────────────────────────────────┘
+      [步骤 4c] applyLogEncoding()
+      │         Log 曲线编码 (线性 → Log OETF)
+      ▼
+      [步骤 5]  applyLUT3D() (可选)
+                四面体插值 (6-case, 每像素仅读 4 顶点)
   ▼
 [输出] 保存 ────── 16-bit TIFF (sRGB ICC) 或 8-bit JPEG (EXIF + sRGB ICC)
 ```
@@ -160,6 +175,7 @@ RawAlchemyCpp/
 │
 ├── include/                        # 公共头文件
 │   ├── common.h                    #   ImageBuffer 核心数据结构 (float32 RGB)
+│   ├── half_buffer.h               #   HalfImageBuffer + NEON F16↔F32 转换 (ARM64 专用)
 │   ├── color_data.h                #   色域矩阵 + Log 曲线 (自动生成)
 │   ├── raw_decoder.h               #   RAW 解码接口 (DecodeParams, CameraMetadata)
 │   ├── log_transform.h             #   色域变换 + Log 编码接口
@@ -239,9 +255,9 @@ RawAlchemyCpp/
 | `src/lens_correction.cpp` + `include/lens_correction.h` | `lensfun_wrapper.py` + `utils.py` (lens correction) | 镜头畸变/色差/暗角校正 |
 | `src/metering.cpp` + `include/metering.h` | `metering.py` | 5 种自动曝光测光策略 |
 | `src/stylize.cpp` + `include/stylize.h` | `utils.py` (`apply_saturation_contrast_inplace`) | 饱和度 + 对比度增强 |
-| `src/log_transform.cpp` + `include/log_transform.h` | `core.py` (Step 4: gamut + log) + `utils.py` (`apply_matrix_inplace`) | 色域变换 + Log 曲线编码 |
+| `src/log_transform.cpp` + `include/log_transform.h` | `core.py` (Step 4: gamut + log) + `utils.py` (`apply_matrix_inplace`) | 色域变换 + Log 曲线编码 (ARM64: float16 优化版 `applyLogEncodingF16`) |
 | `include/color_data.h` | `config.py` + `colour-science` 运行时计算 | 色域矩阵 + Log 曲线定义 |
-| `src/lut_applier.cpp` + `include/lut_applier.h` | `utils.py` (`apply_lut_inplace`) + `colour.LUT` | 3D LUT 加载 + 四面体插值 |
+| `src/lut_applier.cpp` + `include/lut_applier.h` | `utils.py` (`apply_lut_inplace`) + `colour.LUT` | 3D LUT 加载 + 四面体插值 (ARM64: float16 优化版 `applyLUT3DF16`) |
 | `src/tiff_writer.cpp` + `include/tiff_writer.h` | `file_io.py` (TIFF 分支) | 16-bit TIFF 输出 (sRGB ICC 嵌入) |
 | `src/jpeg_writer.cpp` + `include/jpeg_writer.h` | `file_io.py` (JPEG 分支) | 8-bit JPEG 输出 (EXIF 嵌入 + sRGB ICC 嵌入) |
 | `src/exif_injector.cpp` + `include/exif_injector.h` | (无对应) | EXIF 提取 (LibRaw 回调) + libexif 序列化 + JPEG APP1 注入 |
@@ -249,6 +265,7 @@ RawAlchemyCpp/
 | `src/verify.cpp` | (无对应) | 独立 TIFF 统计验证工具 (C++ 独有) |
 | `scripts/gen_color_data.py` | `colour-science` 运行时依赖 | 色彩数据离线代码生成器 |
 | `include/common.h` | NumPy ndarray (隐式) | ImageBuffer 数据结构定义 |
+| `include/half_buffer.h` | (无对应) | HalfImageBuffer (float16) + NEON F16↔F32 转换 (ARM64 专用) |
 | `third_party/glib_shim/` | (无对应 — Python 不需要 GLib2) | GLib2 兼容层 (C++ 编译 Lensfun 所需) |
 | `Test/cross_validate_*.py` | (无对应) | 交叉验证脚本 (C++ 独有) |
 
