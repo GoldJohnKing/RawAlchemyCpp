@@ -86,14 +86,32 @@ JPEG file with EXIF
 
 LibRaw's callback encodes the IFD source in upper bits of the tag number:
 
-| Upper bits | Source IFD | Route to |
-|------------|-----------|-----------|
-| `(ifd+1) << 20` | IFD0 / IFD1 | `EXIF_IFD_0` |
-| `0x00000` | ExifIFD | `EXIF_IFD_EXIF` |
-| `0x50000` | GPS IFD | `EXIF_IFD_GPS` |
-| `0x40000` | Interop IFD | `EXIF_IFD_INTEROPERABILITY` |
+| Upper bits | Source | Route to | LibRaw source |
+|------------|--------|-----------|---------------|
+| `(ifd+1) << 20` (≥`0x100000`) | IFD0 / IFD1 | `EXIF_IFD_0` | `tiff.cpp:65` |
+| `0x00000` | ExifIFD | `EXIF_IFD_EXIF` | `exif_gps.cpp:93` |
+| `0x50000` | GPS IFD | `EXIF_IFD_GPS` | `exif_gps.cpp:359` |
+| `0x40000` | Interop IFD | `EXIF_IFD_INTEROPERABILITY` | `exif_gps.cpp:41` |
+| `0x20000` | Kodak private | `EXIF_IFD_0` | `kodak.cpp:115` |
+| `0x30000` | Panasonic RAW | `EXIF_IFD_0` | `tiff.cpp:65` |
+| `0x60000` | Sony SR2Private | `EXIF_IFD_0` | `tiff.cpp:1598` |
+| `0x70000`, `0x80000` | CR3 parser | Skip (MakerNote-related) | `cr3_parser.cpp` |
 
 Strip upper bits: `real_tag = tag & 0xFFFF`
+
+**IMPORTANT:** Use exact equality for mask checks, NOT bitmask AND. `0x50000 & 0x40000 = 0x40000` (truthy) — interop tags would be misrouted to GPS if checked with `&`.
+
+```cpp
+uint32_t upper = tag & 0xFFF0000;
+if (upper == 0x50000)       ifd = EXIF_IFD_GPS;
+else if (upper == 0x40000)  ifd = EXIF_IFD_INTEROPERABILITY;
+else if (upper >= 0x100000) ifd = EXIF_IFD_0;  // (ifd+1)<<20
+else if (upper == 0x20000)  ifd = EXIF_IFD_0;  // Kodak
+else if (upper == 0x30000)  ifd = EXIF_IFD_0;  // Panasonic
+else if (upper == 0x60000)  ifd = EXIF_IFD_0;  // Sony
+else if (upper == 0x70000 || upper == 0x80000) return; // CR3 MakerNote
+else                        ifd = EXIF_IFD_EXIF; // Plain ExifIFD
+```
 
 ### Tags to Skip
 
@@ -103,12 +121,17 @@ Strip upper bits: `real_tag = tag & 0xFFFF`
 | `0x8769` (ExifIFD pointer) | libexif manages IFD pointers internally |
 | `0xA005` (InteropIFD pointer) | libexif manages internally |
 | `0x8825` (GPSInfoIFD pointer) | libexif manages internally |
-| `0x0100` (ImageWidth) | Will be patched by `patchExifDimensions()` |
-| `0x0101` (ImageLength) | Will be patched by `patchExifDimensions()` |
-| `0xA002` (PixelXDimension) | Will be patched by `patchExifDimensions()` |
-| `0xA003` (PixelYDimension) | Will be patched by `patchExifDimensions()` |
 
-Dimension tags are initially collected but then overridden with actual output dimensions before serialization.
+### Tags with Special Handling (Overridden During Build)
+
+| Tag | Override | Reason |
+|-----|----------|--------|
+| `0x0100` (ImageWidth) | Set to output width | Output dimensions differ from RAW sensor |
+| `0x0101` (ImageLength) | Set to output height | Output dimensions differ from RAW sensor |
+| `0xA002` (PixelXDimension) | Set to output width | Must match actual JPEG pixel dimensions |
+| `0xA003` (PixelYDimension) | Set to output height | Must match actual JPEG pixel dimensions |
+
+These tags are **collected normally** in the callback and **overridden** in `buildExifBlob()` with actual output dimensions.
 
 ## New Dependency: libexif
 
@@ -151,14 +174,21 @@ struct ExifTagRecord {
     uint16_t tag;       // Real tag number (upper bits stripped)
     uint16_t type;      // TIFF data type (1=BYTE, 2=ASCII, 3=SHORT, 4=LONG, 5=RATIONAL, 7=UNDEFINED, 10=SRATIONAL)
     uint32_t count;     // Number of components
-    std::vector<uint8_t> data;  // Raw data bytes read from ifp
+    std::vector<uint8_t> data;  // Raw data bytes read from stream
     ExifIfd ifd;        // Target IFD (IFD_0, IFD_EXIF, IFD_GPS, IFD_INTEROPERABILITY)
 };
 
 struct ExifCollector {
     std::vector<ExifTagRecord> tags;
-    unsigned int byteOrder;  // From first callback invocation
+    unsigned int byteOrder = 0;  // TIFF byte order from source file
+    bool byteOrderSet = false;   // Separate flag (ord could theoretically be 0)
 };
+
+// TIFF data type sizes (per EXIF 2.3 spec)
+static size_t typeSize(int type) {
+    static const size_t sizes[] = {0, 1, 1, 2, 4, 8, 1, 1, 2, 4, 8, 4, 8};
+    return (type >= 1 && type <= 12) ? sizes[type] : 1;
+}
 ```
 
 ### 2. Callback Handler
@@ -168,30 +198,43 @@ static void exifCallback(void* context, int tag, int type, int len,
                           unsigned int ord, void* ifp, INT64 base) {
     auto* collector = static_cast<ExifCollector*>(context);
 
-    // Capture byte order from first tag
-    if (collector->byteOrder == 0) collector->byteOrder = ord;
+    // Guard: skip invalid entries
+    if (type <= 0 || len <= 0) return;
 
-    // Extract real tag and determine IFD
+    // Capture byte order from first tag (TIFF byte order is always 0x4949 or 0x4D4D)
+    if (!collector->byteOrderSet) {
+        collector->byteOrder = ord;
+        collector->byteOrderSet = true;
+    }
+
+    // Extract real tag and determine IFD (exact match, NOT bitmask AND)
     uint16_t realTag = tag & 0xFFFF;
     ExifIfd ifd;
-    if (tag & 0x50000)       ifd = EXIF_IFD_GPS;
-    else if (tag & 0x40000)  ifd = EXIF_IFD_INTEROPERABILITY;
-    else if (tag & 0xF00000) ifd = EXIF_IFD_0;  // IFD0/IFD1
-    else                     ifd = EXIF_IFD_EXIF; // Plain ExifIFD
+    uint32_t upper = tag & 0xFFF0000;
+    if (upper == 0x50000)       ifd = EXIF_IFD_GPS;
+    else if (upper == 0x40000)  ifd = EXIF_IFD_INTEROPERABILITY;
+    else if (upper >= 0x100000) ifd = EXIF_IFD_0;       // (ifd+1)<<20
+    else if (upper == 0x20000)  ifd = EXIF_IFD_0;       // Kodak
+    else if (upper == 0x30000)  ifd = EXIF_IFD_0;       // Panasonic
+    else if (upper == 0x60000)  ifd = EXIF_IFD_0;       // Sony
+    else if (upper == 0x70000 || upper == 0x80000) return; // CR3 MakerNote
+    else                        ifd = EXIF_IFD_EXIF;    // Plain ExifIFD
 
     // Skip MakerNote and IFD pointer tags
     if (realTag == 0x927c || realTag == 0x8769 ||
         realTag == 0xA005 || realTag == 0x8825) return;
 
-    // Read raw data from ifp
+    // Read raw data from ifp (LibRaw_abstract_datastream, NOT FILE*)
     size_t dataSize = len * typeSize(type);
+    if (dataSize == 0 || dataSize > 65536) return;  // Sanity check
+    auto* stream = static_cast<LibRaw_abstract_datastream*>(ifp);
     ExifTagRecord rec;
     rec.tag = realTag;
     rec.type = type;
     rec.count = len;
     rec.ifd = ifd;
     rec.data.resize(dataSize);
-    fread(rec.data.data(), 1, dataSize, ifp);
+    stream->read(rec.data.data(), 1, dataSize);
 
     collector->tags.push_back(std::move(rec));
 }
@@ -224,19 +267,21 @@ std::vector<uint8_t> buildExifBlob(ExifCollector& collector, int outWidth, int o
         entry->format = (ExifFormat)rec.type;
         entry->components = rec.count;
         entry->data = (uint8_t*)exif_entry_alloc(entry, rec.data.size());
+        if (!entry->data) { exif_entry_unref(entry); continue; }
         memcpy(entry->data, rec.data.data(), rec.data.size());
         entry->size = rec.data.size();
         exif_content_add_entry(exif_data->ifd[rec.ifd], entry);
         exif_entry_unref(entry);
     }
 
-    // Serialize
+    // Serialize (output starts with "Exif\0\0" prefix — ready for JPEG APP1)
     unsigned char* blob = nullptr;
     unsigned int blobSize = 0;
     exif_data_save_data(exifData, &blob, &blobSize);
 
     std::vector<uint8_t> result(blob, blob + blobSize);
     exif_data_unref(exifData);
+    // blob allocated by libexif's default allocator (malloc), free() is correct
     if (blob) free(blob);
 
     return result;
