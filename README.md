@@ -28,7 +28,9 @@ The core design, processing pipeline, color science algorithms, and metering str
 | 3D LUT 插值 / 3D LUT interpolation | Numba JIT 四面体插值 | C++ 四面体插值 + OpenMP 并行 |
 | 镜头校正 / Lens correction | ctypes 调用 Lensfun 共享库 | 直接编译 Lensfun 源码 + GLib2 shim |
 | 自动曝光测光 / Auto exposure metering | 5 种策略 (Protocol 模式) | 5 种策略 (函数重载 + 子采样) |
-| 图像输出 / Image output | TIFF / HEIF / JPEG | TIFF (16-bit, ZLIB) / JPEG (8-bit, 4:4:4) |
+| EXIF 元数据嵌入 / EXIF embedding | Pillow 保留 EXIF | LibRaw 回调提取 + libexif 序列化嵌入 JPEG |
+| ICC 配置文件嵌入 / ICC embedding | (Pillow 默认 sRGB) | sRGB IEC61966-2.1 ICC 嵌入 TIFF + JPEG |
+| 图像输出 / Image output | TIFF / HEIF / JPEG | TIFF (16-bit, sRGB ICC) / JPEG (8-bit, 4:4:4, EXIF, sRGB ICC) |
 | CLI 界面 / CLI interface | Click 框架 | 原生命令行参数解析 |
 | C API / FFI 接口 | 无 | C API (`raw_alchemy_capi.h`) + DLL/SO 导出 |
 | 跨平台构建 / Cross-platform build | — | Windows (MSVC/MinGW), Linux, Android (NDK) |
@@ -70,7 +72,16 @@ The core design, processing pipeline, color science algorithms, and metering str
 | **GLib2 依赖** | 依赖系统安装的 GLib2 | **完全消除 GLib2 依赖** — 自写 GLib2 兼容 shim |
 | **GLib2 shim** | 不适用 | C++17 实现，将 GLib2 API 映射到 std::string / std::mutex / pugixml 等 |
 
-#### 4. 架构差异
+#### 4. EXIF 与 ICC 处理方式
+
+| | Raw-Alchemy | C++ Edition |
+|---|---|---|
+| **EXIF 嵌入** | Pillow 保留 EXIF 数据 | LibRaw `exif_parser_callback` 提取 + libexif 序列化 + 手动 APP1 注入 |
+| **MakerNote** | 保留 (Pillow 处理) | 丢弃 (避免偏移损坏) |
+| **ICC 配置文件** | Pillow 内置 sRGB | `constexpr` 嵌入标准 sRGB IEC61966-2.1 (3144 bytes) |
+| **ICC 嵌入位置** | JPEG (Pillow 自动) | TIFF (TIFFTAG_ICCPROFILE) + JPEG (TurboJPEG `tj3SetICCProfile`) |
+
+#### 5. 架构差异
 
 | | Raw-Alchemy | C++ Edition |
 |---|---|---|
@@ -93,6 +104,7 @@ RAW 文件
   ▼
 [步骤 1] 标准化解码 ──── decodeRaw() via LibRaw
   │         RAW → ProPhoto RGB (线性), float32 [0.0, 1.0]
+  │         若输出为 JPEG，同时通过 exif_parser_callback 收集 EXIF 标签
   ▼
 [步骤 1.5] 镜头校正 (可选)  applyLensCorrection() via Lensfun
   │           暗角 → 畸变 + 色差 (Catmull-Rom 双三次重采样)
@@ -110,7 +122,7 @@ RAW 文件
 [步骤 5] 3D LUT 应用 (可选)  loadCubeLUT() + applyLUT3D()
   │         四面体插值 (6-case, 每像素仅读 4 顶点)
   ▼
-[输出] 保存 ────── 16-bit TIFF (ZLIB) 或 8-bit JPEG (4:4:4)
+[输出] 保存 ────── 16-bit TIFF (sRGB ICC) 或 8-bit JPEG (EXIF + sRGB ICC)
 ```
 
 ---
@@ -143,7 +155,7 @@ RAW 文件
 ```
 RawAlchemyCpp/
 ├── CMakeLists.txt                  # CMake 构建系统 (C++17, 静态/共享库)
-├── .gitmodules                     # 6 个第三方库子模块
+├── .gitmodules                     # 7 个第三方库子模块
 ├── .gitignore
 │
 ├── include/                        # 公共头文件
@@ -155,8 +167,10 @@ RawAlchemyCpp/
 │   ├── metering.h                  #   自动曝光测光接口 (5 种模式)
 │   ├── stylize.h                   #   饱和度/对比度增强接口
 │   ├── lens_correction.h           #   镜头校正接口 (Lensfun)
-│   ├── tiff_writer.h               #   16-bit TIFF 输出接口
-│   ├── jpeg_writer.h               #   8-bit JPEG 输出接口
+│   ├── exif_injector.h             #   EXIF 元数据提取与 JPEG 嵌入接口
+│   ├── icc_srgb.h                  #   sRGB IEC61966-2.1 ICC 配置文件 (constexpr)
+│   ├── tiff_writer.h               #   16-bit TIFF 输出接口 (sRGB ICC)
+│   ├── jpeg_writer.h               #   8-bit JPEG 输出接口 (EXIF + sRGB ICC)
 │   ├── raw_alchemy_capi.h          #   C API 接口 (FFI / 共享库)
 │   └── raw_alchemy_export.h        #   平台导出宏 (DLL/SO)
 │
@@ -169,8 +183,9 @@ RawAlchemyCpp/
 │   ├── metering.cpp                #   5 种测光策略实现
 │   ├── stylize.cpp                 #   饱和度/对比度增强实现
 │   ├── lens_correction.cpp         #   Lensfun 镜头校正实现
-│   ├── tiff_writer.cpp             #   16-bit TIFF 输出实现 (libtiff)
-│   ├── jpeg_writer.cpp             #   8-bit JPEG 输出实现 (libjpeg-turbo)
+│   ├── exif_injector.cpp           #   EXIF 提取 + libexif 序列化 + JPEG APP1 注入
+│   ├── tiff_writer.cpp             #   16-bit TIFF 输出实现 (libtiff + sRGB ICC)
+│   ├── jpeg_writer.cpp             #   8-bit JPEG 输出实现 (libjpeg-turbo + EXIF + sRGB ICC)
 │   └── verify.cpp                  #   独立 TIFF 验证工具
 │
 ├── scripts/
@@ -190,6 +205,7 @@ RawAlchemyCpp/
 │   ├── cross_validate_jpeg.py      #   JPEG 全管线对比验证
 │   ├── cross_validate_lens.py      #   镜头校正效果验证
 │   ├── Sample.NEF                  #   测试 RAW 文件 (Nikon NEF)
+│   ├── Result_ACR.JPG              #   Adobe Camera Raw 参考输出
 │   └── FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube  #   测试用 3D LUT
 │
 └── third_party/                    # 第三方依赖 (git 子模块 + 自定义)
@@ -197,12 +213,15 @@ RawAlchemyCpp/
     ├── LibRaw-cmake/               #   LibRaw CMake 封装 (子模块)
     ├── libtiff/                    #   TIFF I/O 库 (子模块)
     ├── libjpeg-turbo/              #   JPEG 编码库 (子模块)
+    ├── libexif/                    #   EXIF 元数据序列化库 (子模块)
     ├── lensfun/                    #   镜头校正库 (子模块)
     ├── pugixml/                    #   XML 解析库 (子模块, 供 GLib2 shim 使用)
     ├── glib_shim/                  #   ★ 自定义 GLib2 兼容层
     │   ├── include/glib.h          #     GLib2 API 头文件
     │   ├── include/glib/gstdio.h   #     重定向到 glib.h
     │   └── src/glib_shim.cpp       #     C++17 实现
+    ├── libexif_config/
+    │   └── config.h.in             #   libexif config.h CMake 模板
     └── lensfun_config/
         └── config.h.in             #   Lensfun config.h CMake 模板
 ```
@@ -224,8 +243,10 @@ RawAlchemyCpp/
 | `src/log_transform.cpp` + `include/log_transform.h` | `core.py` (Step 4: gamut + log) + `utils.py` (`apply_matrix_inplace`) | 色域变换 + Log 曲线编码 |
 | `include/color_data.h` | `config.py` + `colour-science` 运行时计算 | 色域矩阵 + Log 曲线定义 |
 | `src/lut_applier.cpp` + `include/lut_applier.h` | `utils.py` (`apply_lut_inplace`) + `colour.LUT` | 3D LUT 加载 + 四面体插值 |
-| `src/tiff_writer.cpp` + `include/tiff_writer.h` | `file_io.py` (TIFF 分支) | 16-bit TIFF 输出 |
-| `src/jpeg_writer.cpp` + `include/jpeg_writer.h` | `file_io.py` (JPEG 分支) | 8-bit JPEG 输出 |
+| `src/tiff_writer.cpp` + `include/tiff_writer.h` | `file_io.py` (TIFF 分支) | 16-bit TIFF 输出 (sRGB ICC 嵌入) |
+| `src/jpeg_writer.cpp` + `include/jpeg_writer.h` | `file_io.py` (JPEG 分支) | 8-bit JPEG 输出 (EXIF 嵌入 + sRGB ICC 嵌入) |
+| `src/exif_injector.cpp` + `include/exif_injector.h` | (无对应) | EXIF 提取 (LibRaw 回调) + libexif 序列化 + JPEG APP1 注入 |
+| `include/icc_srgb.h` | (Pillow 内置) | sRGB IEC61966-2.1 ICC 配置文件 (constexpr, 3144 bytes) |
 | `src/verify.cpp` | (无对应) | 独立 TIFF 统计验证工具 (C++ 独有) |
 | `scripts/gen_color_data.py` | `colour-science` 运行时依赖 | 色彩数据离线代码生成器 |
 | `include/common.h` | NumPy ndarray (隐式) | ImageBuffer 数据结构定义 |
@@ -234,10 +255,12 @@ RawAlchemyCpp/
 
 ### 说明
 
-- **`core.py` 被拆分**：Python 版的 `core.py` 是单一管线文件，包含全部 6 步处理流程。C++ 版将其拆分为独立模块 (`raw_decoder`, `log_transform`, `lut_applier`, `metering`, `stylize`, `lens_correction`)，管线编排由 `main.cpp` 负责。
+- **`core.py` 被拆分**：Python 版的 `core.py` 是单一管线文件，包含全部 6 步处理流程。C++ 版将其拆分为独立模块 (`raw_decoder`, `log_transform`, `lut_applier`, `metering`, `stylize`, `lens_correction`, `exif_injector`)，管线编排由 `main.cpp` 负责。
 - **`utils.py` 被拆分**：Python 版的 `utils.py` 包含所有 Numba 加速核函数（矩阵变换、LUT 插值、增益、饱和度/对比度等）。C++ 版将这些功能分别归入对应的源文件。
 - **`lensfun_wrapper.py` → 直接编译**：Python 版通过 ctypes 动态加载 Lensfun 共享库；C++ 版直接将 Lensfun 源码编译进项目，并自写了 GLib2 兼容 shim 以消除外部 GLib2 依赖。
 - **`config.py` → `color_data.h`**：Python 版在 `config.py` 中定义 log 空间映射，运行时调用 `colour-science` 计算矩阵和曲线。C++ 版通过 `scripts/gen_color_data.py` 离线生成 `color_data.h`，将所有矩阵和曲线嵌入编译产物。
+- **独有的 EXIF 嵌入**：C++ 版通过 LibRaw 的 `exif_parser_callback` 在解码阶段提取 EXIF 标签，然后用 libexif 序列化为 APP1 blob 并注入 JPEG 输出。MakerNote 被丢弃以避免偏移损坏。
+- **独有的 sRGB ICC 嵌入**：C++ 版将标准 sRGB IEC61966-2.1 ICC 配置文件 (3144 bytes) 以 `constexpr` 数组嵌入，同时写入 TIFF 和 JPEG 输出。
 - **无 GUI**：Python 版包含完整的 Tkinter GUI + matplotlib 实时预览。C++ 版仅提供 CLI。
 - **无 HEIF 输出**：Python 版支持 10-bit HEIF 输出。C++ 版仅支持 TIFF 和 JPEG。
 - **独有的 C API**：C++ 版提供 C 语言 FFI 接口 (`raw_alchemy_capi.h`)，支持构建为共享库 (DLL/SO) 供其他语言调用。
@@ -254,6 +277,7 @@ RawAlchemyCpp/
 | [LibRaw](https://www.libraw.org/) | RAW 文件解码 (支持所有主流相机格式) |
 | [libtiff](http://www.libtiff.org/) | 16-bit TIFF 输出 |
 | [libjpeg-turbo](https://www.libjpeg-turbo.org/) | 8-bit JPEG 输出 (SIMD 加速) |
+| [libexif](https://libexif.github.io/) | EXIF 元数据序列化 (JPEG APP1 嵌入) |
 | [Lensfun](https://lensfun.github.io/) | 镜头校正 (畸变、色差、暗角) |
 | [pugixml](https://pugixml.org/) | XML 解析 (供 GLib2 shim 使用) |
 
@@ -355,6 +379,7 @@ raw_alchemy_cli <input.raw> <output> [--log-space <space>] [options]
 | `--exposure <ev>` | 自动 | 手动曝光值 (EV)，覆盖自动测光 |
 | `--metering <mode>` | `matrix` | 测光模式 (见下表) |
 | `--no-lens-correction` | (默认启用) | 禁用镜头校正 |
+| `--lens-correction` | (默认启用) | 显式启用镜头校正 |
 | `--custom-lensfun-db <path>` | 系统默认 | 自定义 Lensfun XML 数据库路径 |
 | `--half-size` | 关闭 | 半尺寸快速解码 (预览用) |
 | `--no-camera-wb` | 关闭 | 不使用相机白平衡 |
@@ -395,7 +420,7 @@ raw_alchemy_cli Sample.NEF result.jpg \
 3. 使用高光安全测光自动设置曝光
 4. 色域变换至 F-Gamut C + F-Log2C 曲线编码
 5. 应用 `.cube` LUT 进行创意调色
-6. 输出 8-bit JPEG（质量 95）
+6. 输出 8-bit JPEG（质量 95, 嵌入 EXIF + sRGB ICC）
 
 ---
 
@@ -438,6 +463,27 @@ if (result != RA_OK) {
 }
 ```
 
+### 处理到文件 (使用预解析 LUT)
+
+`raProcessFileWithLUT` 接受预解析的 LUT 数据（`float` 数组），避免重复文件 I/O，适合批量处理时缓存 LUT：
+
+```c
+// LUT 数据格式：[size³ × 3] floats, R 变化最快（与 .cube 格式一致）
+float myLutTable[65 * 65 * 65 * 3];  // 预加载的 LUT 数据
+float domainMin[3] = {0.0f, 0.0f, 0.0f};
+float domainMax[3] = {1.0f, 1.0f, 1.0f};
+
+RaResult result = raProcessFileWithLUT(
+    "Sample.NEF", "output.jpg",
+    "F-Log2C",
+    myLutTable, 65,                    // LUT 数据 + 维度
+    domainMin, domainMax,              // LUT 域范围 (NULL = 默认 [0,1])
+    "matrix", 0.0f, 1,                // 测光 + 曝光
+    95,                                // JPEG 质量
+    1, NULL                            // 镜头校正 + Lensfun DB
+);
+```
+
 ### 处理到内存
 
 ```c
@@ -452,10 +498,18 @@ RaResult result = raProcessToBuffer(
 if (result == RA_OK) {
     int width  = raImageGetWidth(buf);
     int height = raImageGetHeight(buf);
-    const float* pixels = raImageGetData(buf);  // RGB float32, row-major
+    int sizeBytes = raImageGetDataSizeBytes(buf);         // 数据大小 (bytes)
+    const float* pixels = raImageGetData(buf);            // RGB float32, row-major
     /* ... 使用像素数据 ... */
     raImageBufferDestroy(buf);
 }
+```
+
+### 辅助函数
+
+```c
+const char* err = raGetLastError();    // 获取最近错误信息 (线程局部)
+const char* ver = raGetVersion();      // 获取库版本号 (如 "0.1.0")
 ```
 
 ### 错误码
