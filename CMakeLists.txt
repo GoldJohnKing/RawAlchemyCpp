@@ -35,6 +35,78 @@ add_subdirectory(third_party/LibRaw-cmake)
 set(RA_LIBRAW_TARGET libraw::libraw_r)
 set(RA_LIBRAW_SOURCE "submodule (LibRaw)")
 
+# libexif — minimal build (EXIF APP1 serialization for JPEG output)
+set(LIBEXIF_VERSION "0.6.26")
+# Detect endianness for libexif config.h
+if(DEFINED CMAKE_C_BYTE_ORDER)
+    if(CMAKE_C_BYTE_ORDER STREQUAL "BIG")
+        set(endianness_def "#define WORDS_BIGENDIAN 1")
+    else()
+        set(endianness_def "/* #undef WORDS_BIGENDIAN */")
+    endif()
+else()
+    # Fallback: check via test
+    include(TestBigEndian)
+    TestBigEndian(IS_BIG_ENDIAN)
+    if(IS_BIG_ENDIAN)
+        set(endianness_def "#define WORDS_BIGENDIAN 1")
+    else()
+        set(endianness_def "/* #undef WORDS_BIGENDIAN */")
+    endif()
+endif()
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libexif_config/config.h.in
+    ${CMAKE_BINARY_DIR}/libexif_generated/config.h @ONLY
+)
+
+set(LIBEXIF_SOURCES
+    third_party/libexif/libexif/exif-byte-order.c
+    third_party/libexif/libexif/exif-content.c
+    third_party/libexif/libexif/exif-data.c
+    third_party/libexif/libexif/exif-entry.c
+    third_party/libexif/libexif/exif-format.c
+    third_party/libexif/libexif/exif-gps-ifd.c
+    third_party/libexif/libexif/exif-ifd.c
+    third_party/libexif/libexif/exif-loader.c
+    third_party/libexif/libexif/exif-log.c
+    third_party/libexif/libexif/exif-mem.c
+    third_party/libexif/libexif/exif-mnote-data.c
+    third_party/libexif/libexif/exif-tag.c
+    third_party/libexif/libexif/exif-utils.c
+    # MakerNote parsers (needed for exif-data.c to compile even though we skip MakerNote)
+    third_party/libexif/libexif/canon/exif-mnote-data-canon.c
+    third_party/libexif/libexif/canon/mnote-canon-entry.c
+    third_party/libexif/libexif/canon/mnote-canon-tag.c
+    third_party/libexif/libexif/fuji/exif-mnote-data-fuji.c
+    third_party/libexif/libexif/fuji/mnote-fuji-entry.c
+    third_party/libexif/libexif/fuji/mnote-fuji-tag.c
+    third_party/libexif/libexif/olympus/exif-mnote-data-olympus.c
+    third_party/libexif/libexif/olympus/mnote-olympus-entry.c
+    third_party/libexif/libexif/olympus/mnote-olympus-tag.c
+    third_party/libexif/libexif/pentax/exif-mnote-data-pentax.c
+    third_party/libexif/libexif/pentax/mnote-pentax-entry.c
+    third_party/libexif/libexif/pentax/mnote-pentax-tag.c
+    third_party/libexif/libexif/apple/exif-mnote-data-apple.c
+    third_party/libexif/libexif/apple/mnote-apple-entry.c
+    third_party/libexif/libexif/apple/mnote-apple-tag.c
+)
+
+add_library(libexif STATIC ${LIBEXIF_SOURCES})
+target_include_directories(libexif PUBLIC
+    ${CMAKE_BINARY_DIR}/libexif_generated                # config.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libexif      # libexif/exif-data.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libexif/libexif  # exif-content.h etc.
+)
+# Compile as C99
+target_compile_features(libexif PUBLIC c_std_99)
+# Suppress warnings from third-party code
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(libexif PRIVATE -w)
+endif()
+
+set(RA_LIBEXIF_TARGET libexif)
+set(RA_LIBEXIF_SOURCE "submodule (libexif ${LIBEXIF_VERSION})")
+
 # libtiff — minimal build (uncompressed 16-bit TIFF output only)
 set(BUILD_SHARED_LIBS  OFF CACHE BOOL "" FORCE)
 set(tiff-tools      OFF CACHE BOOL "" FORCE)
@@ -250,6 +322,7 @@ set(RA_LIBRARY_SOURCES
     src/metering.cpp
     src/stylize.cpp
     src/lens_correction.cpp
+    src/exif_injector.cpp
 )
 
 # Add C API sources when building the C API
@@ -308,6 +381,7 @@ target_link_libraries(raw_alchemy_core PUBLIC
     ${RA_LIBRAW_TARGET}
     ${RA_LIBTIFF_TARGET}
     ${RA_LIBJPEG_TARGET}
+    ${RA_LIBEXIF_TARGET}
 )
 
 # Lensfun linkage
@@ -369,6 +443,7 @@ message(STATUS "  CLI:        ${BUILD_CLI}")
 message(STATUS "  LibRaw:     ${RA_LIBRAW_SOURCE}")
 message(STATUS "  libtiff:    ${RA_LIBTIFF_SOURCE}")
 message(STATUS "  JPEG:       ${RA_LIBJPEG_SOURCE}")
+message(STATUS "  libexif:    ${RA_LIBEXIF_SOURCE}")
 message(STATUS "  Lensfun:    ${RA_LENSFUN_ENABLED}")
     if(RA_LENSFUN_ENABLED)
         message(STATUS "             ${RA_LENSFUN_SOURCE}")
