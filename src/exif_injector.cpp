@@ -160,6 +160,23 @@ static void addLongEntry(ExifData* d, ExifIfd ifd, ExifTag tag, uint32_t value) 
 }
 
 // ----------------------------------------------------------------
+//  Helper: add a SHORT entry to a specific IFD
+// ----------------------------------------------------------------
+static void addShortEntry(ExifData* d, ExifIfd ifd, ExifTag tag, uint16_t value) {
+    ExifEntry* e = exif_entry_new();
+    if (!e) return;
+    e->tag = tag;
+    e->format = EXIF_FORMAT_SHORT;
+    e->components = 1;
+    e->size = 2;
+    e->data = static_cast<uint8_t*>(malloc(2));
+    if (!e->data) { exif_entry_unref(e); return; }
+    exif_set_short(e->data, exif_data_get_byte_order(d), value);
+    exif_content_add_entry(d->ifd[ifd], e);
+    exif_entry_unref(e);
+}
+
+// ----------------------------------------------------------------
 //  Build EXIF APP1 blob from collected tags
 // ----------------------------------------------------------------
 std::vector<uint8_t> buildExifBlob(const ExifCollector& collector,
@@ -185,6 +202,12 @@ std::vector<uint8_t> buildExifBlob(const ExifCollector& collector,
         if (rec.tag == 0x0101 || rec.tag == 0xA003) {
             addLongEntry(exifData, rec.ifd, static_cast<ExifTag>(rec.tag),
                          static_cast<uint32_t>(outHeight));
+            continue;
+        }
+
+        // Override orientation: pixel data is already rotated by LibRaw
+        if (rec.tag == 0x0112) {
+            addShortEntry(exifData, rec.ifd, static_cast<ExifTag>(rec.tag), 1);
             continue;
         }
 
