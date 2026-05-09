@@ -6,7 +6,7 @@
 #define VERSION "@LIBEXIF_VERSION@"
 
 // Disable gettext/NLS — we don't need translated tag descriptions
-/* #undef ENABLE_NLS */
+#undef ENABLE_NLS
 #define GETTEXT_PACKAGE "libexif"
 #define LOCALEDIR ""
 
