@@ -12,10 +12,8 @@
 #include <cstdio>
 #include <vector>
 
-struct LibRaw_abstract_datastream;
-
 // Forward declarations — avoid exposing LibRaw/libexif headers
-struct LibRaw_abstract_datastream;
+class LibRaw_abstract_datastream;
 
 namespace rawalchemy {
 
