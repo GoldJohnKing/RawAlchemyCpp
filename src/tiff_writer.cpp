@@ -12,6 +12,7 @@
  */
 
 #include "tiff_writer.h"
+#include "icc_srgb.h"
 
 #include <tiffio.h>
 #include <cstdio>
@@ -85,6 +86,11 @@ static void setCommonTags(TIFF* tif, int width, int height) {
     TIFFSetField(tif, TIFFTAG_ORIENTATION,    ORIENTATION_TOPLEFT);
     TIFFSetField(tif, TIFFTAG_ROWSPERSTRIP,   1);
     TIFFSetField(tif, TIFFTAG_SOFTWARE,       "Raw Alchemy C++ (Standardized Decoding)");
+
+    // Embed sRGB ICC profile for output color management
+    TIFFSetField(tif, TIFFTAG_ICCPROFILE,
+                 static_cast<uint32_t>(SRGB_ICC_PROFILE_SIZE),
+                 SRGB_ICC_PROFILE);
 }
 
 bool writeTiff16(const ImageBuffer& img, const std::string& outPath) {

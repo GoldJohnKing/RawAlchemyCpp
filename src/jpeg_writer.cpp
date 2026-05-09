@@ -11,6 +11,7 @@
  */
 
 #include "jpeg_writer.h"
+#include "icc_srgb.h"
 
 #include <cstdio>
 #include <vector>
@@ -61,6 +62,11 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
     tj3Set(compressor, TJPARAM_FASTDCT, 0);            // use accurate (slow) DCT
     if (optimize)
         tj3Set(compressor, TJPARAM_OPTIMIZE, 1);       // optimal Huffman tables
+
+    // Embed sRGB ICC profile for output color management
+    tj3SetICCProfile(compressor,
+                     const_cast<unsigned char*>(SRGB_ICC_PROFILE),
+                     SRGB_ICC_PROFILE_SIZE);
 
     unsigned char* jpegBuf = nullptr;
     size_t jpegSize = 0;
