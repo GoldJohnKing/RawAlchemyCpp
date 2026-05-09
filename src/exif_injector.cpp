@@ -95,9 +95,27 @@ static void exifCallback(void* context, int tag, int type, int len,
     else if (upper == 0x70000 || upper == 0x80000) return;  // CR3 MakerNote
     else                        ifd = EXIF_IFD_EXIF;       // Plain ExifIFD
 
-    // Skip MakerNote and IFD pointer tags
-    if (realTag == 0x927c || realTag == 0x8769 ||
-        realTag == 0xA005 || realTag == 0x8825) return;
+    // Skip tags that are invalid when extracted from RAW files:
+    // - MakerNote: manufacturer-specific data with internal offsets
+    //   that break when re-serialized
+    // - IFD pointers: libexif manages these internally during serialization
+    // - Image data pointers: StripOffsets/StripByteCounts reference image
+    //   strip data at absolute file offsets that don't exist in the EXIF blob
+    // - SubIFDs: contain nested IFD structures at absolute file offsets
+    // - JPEG thumbnail pointers: JPEGInterchangeFormat/Length reference
+    //   embedded JPEG thumbnail at absolute file offsets
+    // - Tile data pointers: TileOffsets/TileByteCounts (TIFF tiled images)
+    if (realTag == 0x927c ||                    // MakerNote
+        realTag == 0x8769 ||                    // ExifIFD pointer
+        realTag == 0xA005 ||                    // InteropIFD pointer
+        realTag == 0x8825 ||                    // GPSInfoIFD pointer
+        realTag == 0x0111 ||                    // StripOffsets
+        realTag == 0x0117 ||                    // StripByteCounts
+        realTag == 0x014a ||                    // SubIFDs
+        realTag == 0x0201 ||                    // JPEGInterchangeFormat
+        realTag == 0x0202 ||                    // JPEGInterchangeFormatLength
+        realTag == 0x0144 ||                    // TileOffsets
+        realTag == 0x0145) return;              // TileByteCounts
 
     // Read raw data from ifp (LibRaw_abstract_datastream, NOT FILE*)
     size_t dataSize = static_cast<size_t>(len) * typeSize(type);
