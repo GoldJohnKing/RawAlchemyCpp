@@ -15,6 +15,8 @@
 
 #include "common.h"
 #include <string>
+#include <vector>
+#include <cstdint>
 
 namespace rawalchemy {
 
@@ -28,6 +30,7 @@ namespace rawalchemy {
  * @return true on success, false on failure
  */
 bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
-               int quality = 95, bool optimize = false);
+               int quality = 95, bool optimize = false,
+               const std::vector<uint8_t>* exifData = nullptr);
 
 } // namespace rawalchemy

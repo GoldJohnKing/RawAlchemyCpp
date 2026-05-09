@@ -17,6 +17,11 @@
 
 namespace rawalchemy {
 
+/// Forward declaration — see exif_injector.h for full API
+struct ExifCollector;
+
+struct ExifCollector;  // Forward declaration — see exif_injector.h
+
 /// Decoder configuration — mirrors rawpy postprocess parameters
 struct DecodeParams {
     /// Output color space: 4 = ProPhoto RGB (default, matches Python project)
@@ -60,7 +65,8 @@ struct DecodeParams {
  * @return ImageBuffer  Float32 [0.0, 1.0] image in ProPhoto RGB Linear space
  * @throws std::runtime_error on any error
  */
-ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params = DecodeParams{});
+ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params = DecodeParams{},
+                       ExifCollector* exifCollector = nullptr);
 
 /**
  * @brief Extract camera/lens EXIF metadata from a RAW file.

@@ -14,6 +14,7 @@
 #include "tiff_writer.h"
 #include "jpeg_writer.h"
 #include "lens_correction.h"
+#include "exif_injector.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -173,7 +174,32 @@ int main(int argc, char* argv[]) {
         params.halfSize = halfSize;
         params.useCameraWb = useCameraWb;
         params.demosaicQuality = demosaicQ;
-        rawalchemy::ImageBuffer img = rawalchemy::decodeRaw(inputPath, params);
+
+        // Collect EXIF tags during decode if output is JPEG
+        // (must be set before open_file, so we create collector before decode)
+        bool needExif = false;
+        {
+            std::string ext = outputPath;
+            for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+            if (!outputFormat.empty())
+                needExif = (outputFormat == "jpg" || outputFormat == "jpeg");
+            else
+                needExif = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
+                           (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
+        }
+
+        rawalchemy::ExifCollector* exifCollector = nullptr;
+        if (needExif) {
+            exifCollector = rawalchemy::createExifCollector();
+        }
+
+        rawalchemy::ImageBuffer img;
+        try {
+            img = rawalchemy::decodeRaw(inputPath, params, exifCollector);
+        } catch (...) {
+            if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
+            throw;
+        }
 
         auto t1 = std::chrono::high_resolution_clock::now();
         printf("  -> %dx%d (%.1f MP) in %.0f ms\n",
@@ -294,7 +320,18 @@ int main(int argc, char* argv[]) {
         case OutFormat::Jpeg:
             printf("[Save] 8-bit JPEG (quality=%d, 4:4:4%s)...\n", jpegQuality,
                    jpegOptimize ? ", optimize" : "");
-            ok = rawalchemy::writeJpeg(img, outputPath, jpegQuality, jpegOptimize);
+            {
+                std::vector<uint8_t> exifBlob;
+                if (exifCollector) {
+                    exifBlob = rawalchemy::buildExifBlob(*exifCollector, img.width, img.height);
+                    if (!exifBlob.empty())
+                        printf("  -> EXIF: %zu bytes embedded\n", exifBlob.size());
+                    else
+                        printf("  -> EXIF: no tags collected\n");
+                }
+                ok = rawalchemy::writeJpeg(img, outputPath, jpegQuality, jpegOptimize,
+                                            exifBlob.empty() ? nullptr : &exifBlob);
+            }
             break;
         }
 
@@ -303,6 +340,9 @@ int main(int argc, char* argv[]) {
         printf("  -> Done in %.0f ms\n",
                std::chrono::duration<double, std::milli>(tS1 - tS0).count());
         printf("\n[Complete]\n");
+
+        // Cleanup EXIF collector
+        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
 
     } catch (const std::exception& e) {
         fprintf(stderr, "Error: %s\n", e.what());

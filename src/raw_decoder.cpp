@@ -24,6 +24,7 @@
  */
 
 #include "raw_decoder.h"
+#include "exif_injector.h"
 
 #include <libraw/libraw.h>
 #include <cstdio>
@@ -40,7 +41,8 @@ static void throwLibRawError(int ret, const char* context) {
 }
 
 // ---- decodeRaw ----
-ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params) {
+ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
+                       ExifCollector* exifCollector) {
     // Create LibRaw processor
     LibRaw rawProcessor;
 
@@ -79,6 +81,12 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params) {
     // Half-size mode (optional, for fast preview)
     if (params.halfSize) {
         p.half_size = 1;
+    }
+
+    // Set EXIF callback before open_file if collector provided
+    if (exifCollector) {
+        rawProcessor.set_exifparser_handler(
+            rawalchemy::getExifCallback(), exifCollector);
     }
 
     // --- Open the RAW file ---

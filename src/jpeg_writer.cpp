@@ -11,6 +11,7 @@
  */
 
 #include "jpeg_writer.h"
+#include "exif_injector.h"
 #include "icc_srgb.h"
 
 #include <cstdio>
@@ -22,7 +23,8 @@
 namespace rawalchemy {
 
 bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
-               int quality, bool optimize) {
+               int quality, bool optimize,
+               const std::vector<uint8_t>* exifData) {
     if (img.width <= 0 || img.height <= 0 || img.data.empty()) {
         fprintf(stderr, "[JpegWriter] Invalid image dimensions (%dx%d)\n", img.width, img.height);
         return false;
@@ -89,7 +91,20 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
         return false;
     }
 
-    // Write compressed JPEG data to file
+    // Inject EXIF data if provided, otherwise write directly
+    std::vector<uint8_t> finalJpeg;
+    const uint8_t* writeData;
+    size_t writeSize;
+
+    if (exifData && !exifData->empty()) {
+        finalJpeg = rawalchemy::injectExifIntoJpeg(jpegBuf, jpegSize, *exifData);
+        writeData = finalJpeg.data();
+        writeSize = finalJpeg.size();
+    } else {
+        writeData = jpegBuf;
+        writeSize = jpegSize;
+    }
+
     FILE* fp = fopen(outPath.c_str(), "wb");
     if (!fp) {
         fprintf(stderr, "[JpegWriter] Failed to open output file: %s\n", outPath.c_str());
@@ -98,13 +113,13 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
         return false;
     }
 
-    size_t written = fwrite(jpegBuf, 1, jpegSize, fp);
+    size_t written = fwrite(writeData, 1, writeSize, fp);
     fclose(fp);
 
     tj3Free(jpegBuf);
     tj3Destroy(compressor);
 
-    if (written != jpegSize) {
+    if (written != writeSize) {
         fprintf(stderr, "[JpegWriter] Failed to write JPEG data: %s\n", outPath.c_str());
         return false;
     }

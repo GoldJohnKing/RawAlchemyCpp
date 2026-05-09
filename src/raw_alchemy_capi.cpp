@@ -13,6 +13,7 @@
 #include "tiff_writer.h"
 #include "jpeg_writer.h"
 #include "lens_correction.h"
+#include "exif_injector.h"
 
 #include <cstring>
 #include <string>
@@ -268,8 +269,18 @@ RA_API RaResult RA_CALL raProcessFile(
     clearError();
 
     try {
-        // Decode
-        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        // Determine output format from extension
+        std::string ext = outputPath;
+        for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        bool isJpeg = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
+                      (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
+
+        // Create EXIF collector for JPEG output
+        rawalchemy::ExifCollector* exifCollector = isJpeg
+            ? rawalchemy::createExifCollector() : nullptr;
+
+        // Decode (with optional EXIF collection)
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
 
         // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
@@ -278,21 +289,24 @@ RA_API RaResult RA_CALL raProcessFile(
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,
                                    manualEv, useAutoExposure,
                                    enableLensCorrection, customLensfunDb);
-        if (res != RA_OK) return res;
-
-        // Determine output format from extension
-        std::string ext = outputPath;
-        for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-
-        bool isJpeg = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
-                      (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
+        if (res != RA_OK) {
+            if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
+            return res;
+        }
 
         bool ok;
         if (isJpeg) {
-            ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false);
+            std::vector<uint8_t> exifBlob;
+            if (exifCollector) {
+                exifBlob = rawalchemy::buildExifBlob(*exifCollector, img.width, img.height);
+            }
+            ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false,
+                                        exifBlob.empty() ? nullptr : &exifBlob);
         } else {
             ok = rawalchemy::writeTiff16(img, std::string(outputPath));
         }
+
+        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
 
         if (!ok) {
             setError("Failed to write output file");
@@ -326,7 +340,17 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     clearError();
 
     try {
-        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        // Determine output format from extension
+        std::string ext = outputPath;
+        for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+        bool isJpeg = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
+                      (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
+
+        // Create EXIF collector for JPEG output
+        rawalchemy::ExifCollector* exifCollector = isJpeg
+            ? rawalchemy::createExifCollector() : nullptr;
+
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
         rawalchemy::LUT3D lut;
@@ -351,20 +375,24 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         RaResult res = runPipelineWithLUT(img, meta, logSpace, lutPtr, metering,
                                    manualEv, useAutoExposure,
                                    enableLensCorrection, customLensfunDb);
-        if (res != RA_OK) return res;
-
-        std::string ext = outputPath;
-        for (auto& c : ext) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-
-        bool isJpeg = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
-                      (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
+        if (res != RA_OK) {
+            if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
+            return res;
+        }
 
         bool ok;
         if (isJpeg) {
-            ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false);
+            std::vector<uint8_t> exifBlob;
+            if (exifCollector) {
+                exifBlob = rawalchemy::buildExifBlob(*exifCollector, img.width, img.height);
+            }
+            ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false,
+                                        exifBlob.empty() ? nullptr : &exifBlob);
         } else {
             ok = rawalchemy::writeTiff16(img, std::string(outputPath));
         }
+
+        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
 
         if (!ok) {
             setError("Failed to write output file");
