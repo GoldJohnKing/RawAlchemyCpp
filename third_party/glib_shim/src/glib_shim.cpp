@@ -1,6 +1,8 @@
 // GLib2 compatibility shim — C++17 implementations
 // Replaces all GLib2 functions used by Lensfun with standard C++ equivalents.
-#define _GNU_SOURCE  // for vasprintf
+#ifndef _WIN32
+#define _GNU_SOURCE  // for vasprintf on glibc
+#endif
 
 #include <glib.h>
 #include <pugixml.hpp>
@@ -11,6 +13,16 @@
 #include <unordered_map>
 #include <algorithm>
 #include <new>
+#include <filesystem>
+
+#ifdef _WIN32
+#include <io.h>
+#include <fcntl.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 // ============================================================================
 // Memory management
@@ -107,43 +119,53 @@ const gchar* g_get_user_data_dir(void) {
     return cached.c_str();
 }
 
-// GDir — wraps opendir/readdir
+// GDir — wraps std::filesystem::directory_iterator
 struct _GDir {
-    DIR* dir;
+    std::filesystem::directory_iterator it;
+    std::filesystem::directory_iterator end;
 };
 
 GDir* g_dir_open(const gchar* path, guint /*flags*/, void** /*error*/) {
     if (!path) return nullptr;
-    DIR* d = opendir(path);
-    if (!d) return nullptr;
+    std::error_code ec;
+    auto dir_iter = std::filesystem::directory_iterator(path, ec);
+    if (ec) return nullptr;
     GDir* gdir = (GDir*)g_malloc(sizeof(GDir));
-    gdir->dir = d;
+    new (gdir) _GDir();  // placement new for non-trivial members
+    gdir->it = std::move(dir_iter);
+    gdir->end = std::filesystem::directory_iterator();
     return gdir;
 }
 
 const gchar* g_dir_read_name(GDir* dir) {
-    if (!dir || !dir->dir) return nullptr;
-    struct dirent* entry;
-    while ((entry = readdir(dir->dir)) != nullptr) {
-        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
-            continue;
-        return entry->d_name;
+    if (!dir) return nullptr;
+    // Use a static string to hold the filename — valid until next call.
+    // Lensfun only uses the return value immediately (to copy into std::string).
+    static std::string current_name;
+    while (dir->it != dir->end) {
+        std::string name = dir->it->path().filename().string();
+        dir->it++;  // advance for next call
+        if (name == "." || name == "..") continue;
+        current_name = std::move(name);
+        return current_name.c_str();
     }
     return nullptr;
 }
 
 void g_dir_close(GDir* dir) {
     if (dir) {
-        if (dir->dir) closedir(dir->dir);
+        dir->it.~directory_iterator();
+        dir->end.~directory_iterator();
         g_free(dir);
     }
 }
 
 gboolean g_file_test(const gchar* filename, int test) {
     if (!filename) return FALSE;
-    struct stat st;
-    if (stat(filename, &st) != 0) return FALSE;
-    if (test == G_FILE_TEST_IS_DIR) return S_ISDIR(st.st_mode) ? TRUE : FALSE;
+    if (test == G_FILE_TEST_IS_DIR) {
+        std::error_code ec;
+        return std::filesystem::is_directory(filename, ec) ? TRUE : FALSE;
+    }
     return FALSE;
 }
 
@@ -204,8 +226,22 @@ void g_set_error(GError** error, GQuark domain, gint code, const gchar* format, 
     err->code = code;
     va_list args;
     va_start(args, format);
+#ifdef _WIN32
+    // MSVC doesn't have vasprintf; use _vscprintf + malloc + vsprintf_s
+    int len = _vscprintf(format, args);
+    if (len < 0) {
+        err->message = g_strdup("unknown error");
+    } else {
+        err->message = (gchar*)g_malloc((size_t)len + 1);
+        va_list args2;
+        va_start(args2, format);
+        vsprintf_s(err->message, (size_t)len + 1, format, args2);
+        va_end(args2);
+    }
+#else
     if (vasprintf(&err->message, format, args) == -1)
         err->message = g_strdup("unknown error");
+#endif
     va_end(args);
     *error = err;
 }
@@ -491,7 +527,7 @@ void g_mutex_unlock(GMutex* mutex) {
 void g_static_mutex_lock(GStaticMutex* mutex) {
     if (!mutex) return;
     if (!mutex->mutex_ptr) {
-        mutex->mutex_ptr = (gpointer)new(std::align_val_t(alignof(std::mutex))) unsigned char[sizeof(std::mutex)];
+        mutex->mutex_ptr = (gpointer)new unsigned char[sizeof(std::mutex)];
         new (mutex->mutex_ptr) std::mutex();
     }
     ((std::mutex*)mutex->mutex_ptr)->lock();

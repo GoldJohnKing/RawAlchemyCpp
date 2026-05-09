@@ -26,9 +26,11 @@ void applySaturationContrast(ImageBuffer& img, float saturation, float contrast)
     const float cb = PROPHOTO_LUMA_B;
 
     #ifdef RA_USE_OPENMP
-    #pragma omp parallel for schedule(static, 8192)
-    #endif
+#pragma omp parallel for schedule(static, 8192)
+    for (int i = 0; i < static_cast<int>(nPixels); i++) {
+#else
     for (size_t i = 0; i < nPixels; i++) {
+#endif
         float* p = data + i * 3;
         float r = p[0], g = p[1], b = p[2];
 

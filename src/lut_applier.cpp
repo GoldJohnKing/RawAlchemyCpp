@@ -127,9 +127,11 @@ void applyLUT3D(ImageBuffer& img, const LUT3D& lut) {
     float* data = img.ptr();
 
     #ifdef RA_USE_OPENMP
-    #pragma omp parallel for schedule(static, 8192)
-    #endif
+#pragma omp parallel for schedule(static, 8192)
+    for (int i = 0; i < static_cast<int>(nPixels); i++) {
+#else
     for (size_t i = 0; i < nPixels; i++) {
+#endif
         float* p = data + i * 3;
         float inR = p[0], inG = p[1], inB = p[2];
 

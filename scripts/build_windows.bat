@@ -39,8 +39,16 @@ if %ERRORLEVEL% neq 0 (
 
 echo.
 echo === Build complete ===
-echo DLL: %BUILD_DIR%\bin\raw_alchemy_core.dll
-echo LIB: %BUILD_DIR%\lib\raw_alchemy_core.lib
-echo CLI: %BUILD_DIR%\raw_alchemy_cli.exe
+if "%GENERATOR%"=="" (
+    echo DLL: %BUILD_DIR%\bin\%BUILD_TYPE%\raw_alchemy_core.dll
+    echo LIB: %BUILD_DIR%\lib\%BUILD_TYPE%\raw_alchemy_core.lib
+    echo CLI: %BUILD_DIR%\bin\%BUILD_TYPE%\raw_alchemy_cli.exe
+    echo Verify: %BUILD_DIR%\bin\%BUILD_TYPE%\raw_alchemy_verify.exe
+) else (
+    echo DLL: %BUILD_DIR%\bin\raw_alchemy_core.dll
+    echo LIB: %BUILD_DIR%\lib\raw_alchemy_core.lib
+    echo CLI: %BUILD_DIR%\bin\raw_alchemy_cli.exe
+    echo Verify: %BUILD_DIR%\bin\raw_alchemy_verify.exe
+)
 
 endlocal

@@ -55,9 +55,11 @@ bool applyGamutTransform(ImageBuffer& img, const std::string& logSpace) {
     float* data = img.ptr();
 
     #ifdef RA_USE_OPENMP
-    #pragma omp parallel for schedule(static, 8192)
-    #endif
+#pragma omp parallel for schedule(static, 8192)
+    for (int i = 0; i < static_cast<int>(nPixels); i++) {
+#else
     for (size_t i = 0; i < nPixels; i++) {
+#endif
         float* p = data + i * 3;
         float r = p[0], g = p[1], b = p[2];
 
@@ -83,9 +85,11 @@ bool applyLogEncoding(ImageBuffer& img, const std::string& logSpace) {
     float* data = img.ptr();
 
     #ifdef RA_USE_OPENMP
-    #pragma omp parallel for schedule(static, 8192)
-    #endif
+#pragma omp parallel for schedule(static, 8192)
+    for (int i = 0; i < static_cast<int>(nPixels); i++) {
+#else
     for (size_t i = 0; i < nPixels; i++) {
+#endif
         float* p = data + i * 3;
 
         // Clamp to 1e-6 to prevent log(0) / log(negative)

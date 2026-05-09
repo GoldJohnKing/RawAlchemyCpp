@@ -73,6 +73,15 @@ set(LIBJPEG_TURBO_INSTALL "${CMAKE_BINARY_DIR}/third_party/libjpeg-turbo-install
 # Create the include directory so CMake doesn't complain about non-existent paths
 file(MAKE_DIRECTORY ${LIBJPEG_TURBO_INSTALL}/include)
 
+# libjpeg-turbo names the static library differently per platform:
+#   Windows: turbojpeg-static.lib
+#   Linux/macOS/Android: libturbojpeg.a
+if(WIN32)
+    set(TURBOJPEG_LIB_NAME "turbojpeg-static")
+else()
+    set(TURBOJPEG_LIB_NAME "turbojpeg")
+endif()
+
 ExternalProject_Add(libjpeg-turbo_external
     SOURCE_DIR   ${LIBJPEG_TURBO_SRC}
     BINARY_DIR   ${LIBJPEG_TURBO_BUILD}
@@ -93,14 +102,20 @@ ExternalProject_Add(libjpeg-turbo_external
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
         -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
-    BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
+    BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}${TURBOJPEG_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}
 )
 
 # Create an imported static library target for libjpeg-turbo
+# Uses config-specific IMPORTED_LOCATION for MSVC multi-config generator compatibility
 add_library(turbojpeg STATIC IMPORTED GLOBAL)
+set(TURBOJPEG_LIB "${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}${TURBOJPEG_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}")
 set_target_properties(turbojpeg PROPERTIES
-    IMPORTED_LOCATION ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
-    INTERFACE_INCLUDE_DIRECTORIES ${LIBJPEG_TURBO_INSTALL}/include
+    IMPORTED_LOCATION "${TURBOJPEG_LIB}"
+    IMPORTED_LOCATION_RELEASE "${TURBOJPEG_LIB}"
+    IMPORTED_LOCATION_DEBUG "${TURBOJPEG_LIB}"
+    IMPORTED_LOCATION_MINSIZEREL "${TURBOJPEG_LIB}"
+    IMPORTED_LOCATION_RELWITHDEBINFO "${TURBOJPEG_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${LIBJPEG_TURBO_INSTALL}/include"
 )
 add_dependencies(turbojpeg libjpeg-turbo_external)
 
@@ -199,7 +214,7 @@ if(ENABLE_LENS_CORRECTION)
     target_link_libraries(lensfun PRIVATE glib_shim)
 
     # Compile definitions for Lensfun
-    target_compile_definitions(lensfun PRIVATE CONF_LENSFUN_STATIC)
+    target_compile_definitions(lensfun PUBLIC CONF_LENSFUN_STATIC)
 
     # SSE/SSE2 flags for x86 optimization
     if(VECTORIZATION_SSE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -264,7 +279,7 @@ if(BUILD_SHARED)
     # Windows: generate .lib import library alongside .dll
     if(WIN32)
         set_target_properties(raw_alchemy_core PROPERTIES
-            WINDOWS_EXPORT_ALL_SYMBOLS OFF
+            WINDOWS_EXPORT_ALL_SYMBOLS ON
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
             LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
             ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
@@ -325,12 +340,23 @@ if(BUILD_CLI)
     # ---- Verification tool ----
     add_executable(raw_alchemy_verify src/verify.cpp)
     target_link_libraries(raw_alchemy_verify PRIVATE raw_alchemy_core)
+
+    # Windows: place executables next to the DLL so they can find it at runtime
+    if(WIN32 AND BUILD_SHARED)
+        set_target_properties(raw_alchemy_cli raw_alchemy_verify PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+        )
+    endif()
+
+    # Compiler warnings for CLI targets
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(raw_alchemy_cli PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 # ---- Compiler warnings ----
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O2)
-    target_compile_options(raw_alchemy_cli PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 # ---- Status ----

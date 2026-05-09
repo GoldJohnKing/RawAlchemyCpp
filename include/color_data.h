@@ -199,7 +199,6 @@ inline float logEncode(float x, LogCurve curve) {
         constexpr float off_lin = 0.12512219f;
         constexpr float off_pos = 0.12240537f;
         constexpr float mult = 14.98325f;
-        constexpr float thr_neg = 0.097465473f;
         constexpr float thr_pos = 0.15277891f;
         float s = x / 0.9f;
         if (s < 0.0f) return -slope * std::log10(-s * mult + 1.0f) + off_neg;
@@ -225,11 +224,11 @@ inline float logEncode(float x, LogCurve curve) {
     }
     case LogCurve::Arri_LogC4: {
         // ARRI LogC4
-        constexpr float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;
-        constexpr float b = (1023.0f - 95.0f) / 1023.0f;
-        constexpr float c = 95.0f / 1023.0f;
-        constexpr float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);
-        constexpr float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;
+        const float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;
+        const float b = (1023.0f - 95.0f) / 1023.0f;
+        const float c = 95.0f / 1023.0f;
+        const float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);
+        const float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;
         if (x >= t) return (std::log2(a * x + 64.0f) - 6.0f) / 14.0f * b + c;
         return (x - t) / s_val;
     }

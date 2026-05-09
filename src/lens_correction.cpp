@@ -14,6 +14,14 @@
 
 #include "lens_correction.h"
 
+#include <filesystem>
+
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 #ifdef RA_LENSFUN_ENABLED
 #include <lensfun/lensfun.h>
 #endif
@@ -158,8 +166,7 @@ bool applyLensCorrection(ImageBuffer& img,
         }
 
         // Load custom database — detect directory vs file
-        struct stat st;
-        if (stat(params.customDbPath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        if (std::filesystem::is_directory(params.customDbPath)) {
             // Directory: let Lensfun scan for XML files
             err = db->Load(params.customDbPath.c_str());
             if (err != LF_NO_ERROR) {
