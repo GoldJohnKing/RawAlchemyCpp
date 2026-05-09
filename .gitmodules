@@ -16,3 +16,6 @@
 [submodule "third_party/pugixml"]
 	path = third_party/pugixml
 	url = https://github.com/zeux/pugixml.git
+[submodule "third_party/libexif"]
+	path = third_party/libexif
+	url = https://github.com/libexif/libexif.git

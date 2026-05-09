@@ -137,7 +137,7 @@ These tags are **collected normally** in the callback and **overridden** in `bui
 
 | Aspect | Details |
 |--------|---------|
-| **Version** | v0.6.25 |
+| **Version** | v0.6.26 |
 | **License** | LGPL v2.1 (compatible with AGPL v3) |
 | **Language** | Pure C |
 | **Dependencies** | None |
@@ -164,6 +164,28 @@ These tags are **collected normally** in the callback and **overridden** in `bui
 | `src/raw_alchemy_capi.cpp` | C API: extract and pass EXIF for JPEG output |
 | `CMakeLists.txt` | Add libexif submodule + exif_injector.cpp |
 | `.gitmodules` | Add libexif submodule |
+
+### Integration Mechanism
+
+The callback must be set **before** `LibRaw::open_file()` because it fires during the identify/parse phase. The recommended approach:
+
+**Modify `decodeRaw()` in `raw_decoder.cpp`** to accept an optional `ExifCollector*` parameter:
+
+```cpp
+// Before (raw_decoder.h):
+bool decodeRaw(const std::string& rawPath);
+
+// After:
+struct ExifCollector;  // Forward declaration
+bool decodeRaw(const std::string& rawPath, ExifCollector* exifCollector = nullptr);
+```
+
+When `exifCollector != nullptr`:
+1. Call `rawProcessor.set_exifparser_handler(exifCallback, exifCollector)` before `open_file()`
+2. Callback fires during `open_file()`, populating `exifCollector->tags`
+3. After `decodeRaw()` returns, caller passes collector to `buildExifBlob()`
+
+This avoids opening the file a third time (it's already opened twice: once in `decodeRaw()`, once in `extractMetadata()`).
 
 ## Implementation Details
 
@@ -234,7 +256,7 @@ static void exifCallback(void* context, int tag, int type, int len,
     rec.count = len;
     rec.ifd = ifd;
     rec.data.resize(dataSize);
-    stream->read(rec.data.data(), 1, dataSize);
+    if (stream->read(rec.data.data(), 1, dataSize) != (int)dataSize) return;  // Truncated read
 
     collector->tags.push_back(std::move(rec));
 }
@@ -262,17 +284,24 @@ std::vector<uint8_t> buildExifBlob(ExifCollector& collector, int outWidth, int o
         }
 
         // Create generic entry
+        // NOTE: exif_entry_alloc() is static/private in libexif — use malloc() instead.
+        // This is safe because exif_data_new() uses the default allocator (calloc/free),
+        // and exif_entry_free() calls exif_mem_free() → free() on entry->data.
         ExifEntry* entry = exif_entry_new();
         entry->tag = rec.tag;
         entry->format = (ExifFormat)rec.type;
         entry->components = rec.count;
-        entry->data = (uint8_t*)exif_entry_alloc(entry, rec.data.size());
+        entry->data = (uint8_t*)malloc(rec.data.size());
         if (!entry->data) { exif_entry_unref(entry); continue; }
         memcpy(entry->data, rec.data.data(), rec.data.size());
         entry->size = rec.data.size();
         exif_content_add_entry(exif_data->ifd[rec.ifd], entry);
         exif_entry_unref(entry);
     }
+
+    // Ensure EXIF compliance — adds mandatory tags, fixes inconsistencies
+    exif_data_set_option(exifData, EXIF_DATA_OPTION_FOLLOW_SPECIFICATION);
+    exif_data_fix(exifData);
 
     // Serialize (output starts with "Exif\0\0" prefix — ready for JPEG APP1)
     unsigned char* blob = nullptr;
