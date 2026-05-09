@@ -25,6 +25,10 @@
 #include <omp.h>
 #endif
 
+#if defined(__aarch64__)
+#include "half_buffer.h"
+#endif
+
 namespace rawalchemy {
 
 // ============================================================
@@ -233,5 +237,137 @@ void applyLUT3D(ImageBuffer& img, const LUT3D& lut) {
         p[2] = bVal;
     }
 }
+
+// ---- ARM64 float16-optimized LUT interpolation ----
+#if defined(__aarch64__)
+
+void applyLUT3DF16(HalfImageBuffer& img, const LUT3D& lut) {
+    const int size = lut.size;
+    const int sizeM1 = size - 1;
+    const float sizeF = static_cast<float>(sizeM1);
+
+    const float scaleR = sizeF / (lut.domainMax[0] - lut.domainMin[0]);
+    const float scaleG = sizeF / (lut.domainMax[1] - lut.domainMin[1]);
+    const float scaleB = sizeF / (lut.domainMax[2] - lut.domainMin[2]);
+    const float minR = lut.domainMin[0];
+    const float minG = lut.domainMin[1];
+    const float minB = lut.domainMin[2];
+
+    const float* table = lut.table.data();
+    const size_t nPixels = img.pixelCount();
+    uint16_t* data = img.ptr();
+
+    #ifdef RA_USE_OPENMP
+    #pragma omp parallel for schedule(static, 8192)
+    #endif
+    for (int i = 0; i < static_cast<int>(nPixels); i++) {
+        uint16_t* p = data + i * 3;
+
+        // Load 3 float16 values -> float32
+        float inR, inG, inB;
+        {
+            __fp16 h;
+            std::memcpy(&h, &p[0], 2); inR = static_cast<float>(h);
+            std::memcpy(&h, &p[1], 2); inG = static_cast<float>(h);
+            std::memcpy(&h, &p[2], 2); inB = static_cast<float>(h);
+        }
+
+        // --- IDENTICAL tetrahedral interpolation to applyLUT3D ---
+        float rawIdxR = (inR - minR) * scaleR;
+        float rawIdxG = (inG - minG) * scaleG;
+        float rawIdxB = (inB - minB) * scaleB;
+
+        float idxR = std::max(0.0f, std::min(rawIdxR, sizeF));
+        float idxG = std::max(0.0f, std::min(rawIdxG, sizeF));
+        float idxB = std::max(0.0f, std::min(rawIdxB, sizeF));
+
+        int x0 = static_cast<int>(idxR);
+        int y0 = static_cast<int>(idxG);
+        int z0 = static_cast<int>(idxB);
+
+        int x1 = (x0 < sizeM1) ? x0 + 1 : x0;
+        int y1 = (y0 < sizeM1) ? y0 + 1 : y0;
+        int z1 = (z0 < sizeM1) ? z0 + 1 : z0;
+
+        float dx = idxR - x0;
+        float dy = idxG - y0;
+        float dz = idxB - z0;
+
+        float rVal = 0.0f, gVal = 0.0f, bVal = 0.0f;
+
+        #define TBL_F16(r, g, b, c) table[((r) + (g)*size + (b)*size*size) * 3 + (c)]
+
+        if (dx >= dy) {
+            if (dy >= dz) {
+                // Case 1: dx >= dy >= dz
+                float w0 = 1.0f - dx;
+                float w1 = dx - dy;
+                float w2 = dy - dz;
+                rVal = TBL_F16(x0,y0,z0,0)*w0 + TBL_F16(x1,y0,z0,0)*w1 + TBL_F16(x1,y1,z0,0)*w2 + TBL_F16(x1,y1,z1,0)*dz;
+                gVal = TBL_F16(x0,y0,z0,1)*w0 + TBL_F16(x1,y0,z0,1)*w1 + TBL_F16(x1,y1,z0,1)*w2 + TBL_F16(x1,y1,z1,1)*dz;
+                bVal = TBL_F16(x0,y0,z0,2)*w0 + TBL_F16(x1,y0,z0,2)*w1 + TBL_F16(x1,y1,z0,2)*w2 + TBL_F16(x1,y1,z1,2)*dz;
+            }
+            else if (dx >= dz) {
+                // Case 2: dx >= dz > dy
+                float w0 = 1.0f - dx;
+                float w1 = dx - dz;
+                float w2 = dz - dy;
+                rVal = TBL_F16(x0,y0,z0,0)*w0 + TBL_F16(x1,y0,z0,0)*w1 + TBL_F16(x1,y0,z1,0)*w2 + TBL_F16(x1,y1,z1,0)*dy;
+                gVal = TBL_F16(x0,y0,z0,1)*w0 + TBL_F16(x1,y0,z0,1)*w1 + TBL_F16(x1,y0,z1,1)*w2 + TBL_F16(x1,y1,z1,1)*dy;
+                bVal = TBL_F16(x0,y0,z0,2)*w0 + TBL_F16(x1,y0,z0,2)*w1 + TBL_F16(x1,y0,z1,2)*w2 + TBL_F16(x1,y1,z1,2)*dy;
+            }
+            else {
+                // Case 3: dz > dx >= dy
+                float w0 = 1.0f - dz;
+                float w1 = dz - dx;
+                float w2 = dx - dy;
+                rVal = TBL_F16(x0,y0,z0,0)*w0 + TBL_F16(x0,y0,z1,0)*w1 + TBL_F16(x1,y0,z1,0)*w2 + TBL_F16(x1,y1,z1,0)*dy;
+                gVal = TBL_F16(x0,y0,z0,1)*w0 + TBL_F16(x0,y0,z1,1)*w1 + TBL_F16(x1,y0,z1,1)*w2 + TBL_F16(x1,y1,z1,1)*dy;
+                bVal = TBL_F16(x0,y0,z0,2)*w0 + TBL_F16(x0,y0,z1,2)*w1 + TBL_F16(x1,y0,z1,2)*w2 + TBL_F16(x1,y1,z1,2)*dy;
+            }
+        }
+        else { // dy > dx
+            if (dz >= dy) {
+                // Case 6: dz > dy > dx
+                float w0 = 1.0f - dz;
+                float w1 = dz - dy;
+                float w2 = dy - dx;
+                rVal = TBL_F16(x0,y0,z0,0)*w0 + TBL_F16(x0,y0,z1,0)*w1 + TBL_F16(x0,y1,z1,0)*w2 + TBL_F16(x1,y1,z1,0)*dx;
+                gVal = TBL_F16(x0,y0,z0,1)*w0 + TBL_F16(x0,y0,z1,1)*w1 + TBL_F16(x0,y1,z1,1)*w2 + TBL_F16(x1,y1,z1,1)*dx;
+                bVal = TBL_F16(x0,y0,z0,2)*w0 + TBL_F16(x0,y0,z1,2)*w1 + TBL_F16(x0,y1,z1,2)*w2 + TBL_F16(x1,y1,z1,2)*dx;
+            }
+            else if (dz >= dx) {
+                // Case 5: dy >= dz > dx
+                float w0 = 1.0f - dy;
+                float w1 = dy - dz;
+                float w2 = dz - dx;
+                rVal = TBL_F16(x0,y0,z0,0)*w0 + TBL_F16(x0,y1,z0,0)*w1 + TBL_F16(x0,y1,z1,0)*w2 + TBL_F16(x1,y1,z1,0)*dx;
+                gVal = TBL_F16(x0,y0,z0,1)*w0 + TBL_F16(x0,y1,z0,1)*w1 + TBL_F16(x0,y1,z1,1)*w2 + TBL_F16(x1,y1,z1,1)*dx;
+                bVal = TBL_F16(x0,y0,z0,2)*w0 + TBL_F16(x0,y1,z0,2)*w1 + TBL_F16(x0,y1,z1,2)*w2 + TBL_F16(x1,y1,z1,2)*dx;
+            }
+            else {
+                // Case 4: dy > dx >= dz
+                float w0 = 1.0f - dy;
+                float w1 = dy - dx;
+                float w2 = dx - dz;
+                rVal = TBL_F16(x0,y0,z0,0)*w0 + TBL_F16(x0,y1,z0,0)*w1 + TBL_F16(x1,y1,z0,0)*w2 + TBL_F16(x1,y1,z1,0)*dz;
+                gVal = TBL_F16(x0,y0,z0,1)*w0 + TBL_F16(x0,y1,z0,1)*w1 + TBL_F16(x1,y1,z0,1)*w2 + TBL_F16(x1,y1,z1,1)*dz;
+                bVal = TBL_F16(x0,y0,z0,2)*w0 + TBL_F16(x0,y1,z0,2)*w1 + TBL_F16(x1,y1,z0,2)*w2 + TBL_F16(x1,y1,z1,2)*dz;
+            }
+        }
+
+        #undef TBL_F16
+
+        // Store float32 results back as float16
+        {
+            __fp16 h;
+            h = static_cast<__fp16>(rVal); std::memcpy(&p[0], &h, 2);
+            h = static_cast<__fp16>(gVal); std::memcpy(&p[1], &h, 2);
+            h = static_cast<__fp16>(bVal); std::memcpy(&p[2], &h, 2);
+        }
+    }
+}
+
+#endif // __aarch64__
 
 } // namespace rawalchemy

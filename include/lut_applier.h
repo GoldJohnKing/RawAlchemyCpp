@@ -55,4 +55,15 @@ LUT3D loadCubeLUT(const std::string& path);
  */
 void applyLUT3D(ImageBuffer& img, const LUT3D& lut);
 
+#if defined(__aarch64__)
+/**
+ * @brief ARM64 float16-optimized 3D LUT tetrahedral interpolation.
+ *
+ * Same semantics as applyLUT3D() but reads/writes float16 image data.
+ * LUT table remains float32 (fits in cache). Image memory traffic is halved.
+ * Available only on aarch64.
+ */
+void applyLUT3DF16(struct HalfImageBuffer& img, const LUT3D& lut);
+#endif
+
 } // namespace rawalchemy

@@ -51,6 +51,21 @@ bool applyGamutTransform(ImageBuffer& img, const std::string& logSpace);
  */
 bool applyLogEncoding(ImageBuffer& img, const std::string& logSpace);
 
+#if defined(__aarch64__)
+struct HalfImageBuffer;  // forward declaration (defined in half_buffer.h)
+
+/**
+ * @brief ARM64 float16-optimized log curve encoding.
+ *
+ * Same semantics as applyLogEncoding() but operates on float16 image data.
+ * Memory traffic is halved vs float32. Math is performed in float32 after
+ * NEON register-level conversion.
+ *
+ * Available only on aarch64. On other platforms, use applyLogEncoding().
+ */
+bool applyLogEncodingF16(HalfImageBuffer& img, const std::string& logSpace);
+#endif
+
 /**
  * @brief Complete Step 2 pipeline: Gamut + Log Curve.
  *

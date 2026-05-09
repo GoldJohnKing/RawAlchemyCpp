@@ -449,6 +449,12 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     endif()
 endif()
 
+# ARM64 float16 support detection (for half-precision bandwidth optimization)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_definitions(raw_alchemy_core PUBLIC RA_HAS_FLOAT16)
+    message(STATUS "  float16:    enabled (ARM64 NEON FP16)")
+endif()
+
 # ---- Status ----
 message(STATUS "")
 message(STATUS "=== Raw Alchemy (C++ Edition) ===")

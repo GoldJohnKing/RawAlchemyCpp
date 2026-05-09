@@ -16,6 +16,10 @@
 #include "lens_correction.h"
 #include "exif_injector.h"
 
+#if defined(__aarch64__)
+#include "half_buffer.h"
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -260,14 +264,42 @@ int main(int argc, char* argv[]) {
         if (!logSpace.empty()) {
             printf("[Step 4] Log Transform: %s\n", logSpace.c_str());
             auto t2 = std::chrono::high_resolution_clock::now();
-            rawalchemy::applyLogTransform(img, logSpace);
+
+            // Gamut transform always in float32 (linear light, needs precision)
+            rawalchemy::applyGamutTransform(img, logSpace);
+
+            #if defined(__aarch64__)
+            // ARM64: convert to float16 for log encoding + LUT (halves memory bandwidth)
+            auto imgF16 = rawalchemy::convertToF16(img);
+            rawalchemy::applyLogEncodingF16(imgF16, logSpace);
+
+            // LUT also in float16 on ARM64
+            if (!lutPath.empty()) {
+                printf("[Step 5] LUT: %s\n", lutPath.c_str());
+                auto tL0 = std::chrono::high_resolution_clock::now();
+                auto lut = rawalchemy::loadCubeLUT(lutPath);
+                rawalchemy::applyLUT3DF16(imgF16, lut);
+                auto tL1 = std::chrono::high_resolution_clock::now();
+                printf("  -> Done in %.0f ms\n",
+                       std::chrono::duration<double, std::milli>(tL1 - tL0).count());
+                printf("\n");
+            }
+
+            // Convert back to float32 for output
+            img = rawalchemy::convertToF32(imgF16);
+            #else
+            // Non-ARM: use float32 pipeline as before
+            rawalchemy::applyLogEncoding(img, logSpace);
+            #endif
+
             auto t3 = std::chrono::high_resolution_clock::now();
             printf("  -> Done in %.0f ms\n",
                    std::chrono::duration<double, std::milli>(t3 - t2).count());
             printf("\n");
         }
 
-        // --- Step 5: LUT ---
+        #if !defined(__aarch64__)
+        // --- Step 5: LUT (non-ARM path only; ARM handles LUT inside Step 4) ---
         if (!lutPath.empty()) {
             printf("[Step 5] LUT: %s\n", lutPath.c_str());
             auto tL0 = std::chrono::high_resolution_clock::now();
@@ -278,6 +310,7 @@ int main(int argc, char* argv[]) {
                    std::chrono::duration<double, std::milli>(tL1 - tL0).count());
             printf("\n");
         }
+        #endif
 
         // --- Determine output format ---
         // Auto-detect from file extension if --format not specified

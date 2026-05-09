@@ -21,6 +21,10 @@
 #include <omp.h>
 #endif
 
+#if defined(__aarch64__)
+#include "half_buffer.h"
+#endif
+
 namespace rawalchemy {
 
 // ---- Utility ----
@@ -121,5 +125,46 @@ bool applyLogTransform(ImageBuffer& img, const std::string& logSpace) {
 
     return true;
 }
+
+// ---- ARM64 float16-optimized log encoding ----
+#if defined(__aarch64__)
+
+bool applyLogEncodingF16(HalfImageBuffer& img, const std::string& logSpace) {
+    auto it = LOG_SPACES.find(logSpace);
+    if (it == LOG_SPACES.end()) {
+        fprintf(stderr, "[LogTransform] Unknown log space: %s\n", logSpace.c_str());
+        return false;
+    }
+
+    LogCurve curve = it->second.curve;
+    const size_t nPixels = img.pixelCount();
+    uint16_t* data = img.ptr();
+
+    #ifdef RA_USE_OPENMP
+    #pragma omp parallel for schedule(static, 4096)
+    #endif
+    for (int i = 0; i < static_cast<int>(nPixels); i++) {
+        uint16_t* p = data + i * 3;
+
+        for (int c = 0; c < 3; ++c) {
+            // Load float16, convert to float32 for computation
+            __fp16 h;
+            std::memcpy(&h, &p[c], sizeof(uint16_t));
+            float val = static_cast<float>(h);
+
+            // Clamp and apply log curve (float32 math)
+            val = std::max(val, 1e-6f);
+            float encoded = logEncode(val, curve);
+
+            // Store back as float16
+            h = static_cast<__fp16>(encoded);
+            std::memcpy(&p[c], &h, sizeof(uint16_t));
+        }
+    }
+
+    return true;
+}
+
+#endif // __aarch64__
 
 } // namespace rawalchemy

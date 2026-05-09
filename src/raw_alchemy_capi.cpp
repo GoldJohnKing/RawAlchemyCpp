@@ -15,6 +15,10 @@
 #include "lens_correction.h"
 #include "exif_injector.h"
 
+#if defined(__aarch64__)
+#include "half_buffer.h"
+#endif
+
 #include <cstring>
 #include <string>
 #include <stdexcept>
@@ -101,6 +105,11 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
                      int useAutoExposure,
                      int enableLensCorrection,
                      const char* customLensfunDb) {
+    #if defined(__aarch64__)
+    rawalchemy::HalfImageBuffer imgF16;
+    bool usingF16 = false;
+    #endif
+
     // Lens correction
     if (enableLensCorrection) {
         try {
@@ -150,7 +159,16 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
                 setError(std::string("Unsupported log space: ") + logSpace);
                 return RA_ERR_LOG_UNSUPPORTED;
             }
-            rawalchemy::applyLogTransform(img, space);
+            // Gamut transform always in float32
+            rawalchemy::applyGamutTransform(img, space);
+
+            #if defined(__aarch64__)
+            imgF16 = rawalchemy::convertToF16(img);
+            rawalchemy::applyLogEncodingF16(imgF16, space);
+            usingF16 = true;
+            #else
+            rawalchemy::applyLogEncoding(img, space);
+            #endif
         } catch (...) {
             return catchExceptions("log transform");
         }
@@ -160,11 +178,26 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
     if (lutPath) {
         try {
             auto lut = rawalchemy::loadCubeLUT(std::string(lutPath));
+            #if defined(__aarch64__)
+            if (usingF16) {
+                rawalchemy::applyLUT3DF16(imgF16, lut);
+            } else {
+                rawalchemy::applyLUT3D(img, lut);
+            }
+            #else
             rawalchemy::applyLUT3D(img, lut);
+            #endif
         } catch (...) {
             return catchExceptions("LUT");
         }
     }
+
+    // Convert back from float16 before output
+    #if defined(__aarch64__)
+    if (usingF16) {
+        img = rawalchemy::convertToF32(imgF16);
+    }
+    #endif
 
     return RA_OK;
 }
@@ -178,6 +211,11 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
                             int useAutoExposure,
                             int enableLensCorrection,
                             const char* customLensfunDb) {
+    #if defined(__aarch64__)
+    rawalchemy::HalfImageBuffer imgF16;
+    bool usingF16 = false;
+    #endif
+
     // Lens correction
     if (enableLensCorrection) {
         try {
@@ -226,7 +264,16 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
                 setError(std::string("Unsupported log space: ") + logSpace);
                 return RA_ERR_LOG_UNSUPPORTED;
             }
-            rawalchemy::applyLogTransform(img, space);
+            // Gamut transform always in float32
+            rawalchemy::applyGamutTransform(img, space);
+
+            #if defined(__aarch64__)
+            imgF16 = rawalchemy::convertToF16(img);
+            rawalchemy::applyLogEncodingF16(imgF16, space);
+            usingF16 = true;
+            #else
+            rawalchemy::applyLogEncoding(img, space);
+            #endif
         } catch (...) {
             return catchExceptions("log transform");
         }
@@ -235,11 +282,26 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
     // LUT — use pre-parsed data directly
     if (lut && !lut->empty()) {
         try {
+            #if defined(__aarch64__)
+            if (usingF16) {
+                rawalchemy::applyLUT3DF16(imgF16, *lut);
+            } else {
+                rawalchemy::applyLUT3D(img, *lut);
+            }
+            #else
             rawalchemy::applyLUT3D(img, *lut);
+            #endif
         } catch (...) {
             return catchExceptions("LUT");
         }
     }
+
+    // Convert back from float16 before output
+    #if defined(__aarch64__)
+    if (usingF16) {
+        img = rawalchemy::convertToF32(imgF16);
+    }
+    #endif
 
     return RA_OK;
 }
