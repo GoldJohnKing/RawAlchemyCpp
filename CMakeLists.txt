@@ -8,6 +8,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# ---- Build options ----
+option(BUILD_SHARED "Build raw_alchemy_core as a shared library (DLL/SO)" OFF)
+option(BUILD_CAPI   "Build C API wrapper for FFI/shared library use" OFF)
+option(BUILD_CLI    "Build CLI executable" ON)
+
+# Automatically enable C API when building shared
+if(BUILD_SHARED)
+    set(BUILD_CAPI ON CACHE BOOL "" FORCE)
+    # All static dependencies must be compiled with -fPIC for shared library linking
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
+endif()
+
 # ---- Dependencies (built from git submodules) ----
 
 # LibRaw via LibRaw-cmake wrapper
@@ -80,6 +92,7 @@ ExternalProject_Add(libjpeg-turbo_external
         -DWITH_TESTS=OFF
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
         -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}turbojpeg${CMAKE_STATIC_LIBRARY_SUFFIX}
 )
 
@@ -179,6 +192,7 @@ if(ENABLE_LENS_CORRECTION)
     # 3. GLib2 shim (for #include <glib.h> from lensfunprv.h) — resolved via glib_shim link
     target_include_directories(lensfun PRIVATE
         ${CMAKE_BINARY_DIR}/lensfun_generated
+        ${CMAKE_BINARY_DIR}/lensfun_generated/lensfun
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lensfun/libs/lensfun
     )
     # GLib2 shim comes from linking glib_shim (its PUBLIC include dirs propagate)
@@ -223,7 +237,53 @@ set(RA_LIBRARY_SOURCES
     src/lens_correction.cpp
 )
 
-add_library(raw_alchemy_core STATIC ${RA_LIBRARY_SOURCES})
+# Add C API sources when building the C API
+if(BUILD_CAPI)
+    list(APPEND RA_LIBRARY_SOURCES src/raw_alchemy_capi.cpp)
+endif()
+
+if(BUILD_SHARED)
+    add_library(raw_alchemy_core SHARED ${RA_LIBRARY_SOURCES})
+    # All code linked into a shared library must be position-independent
+    set_target_properties(raw_alchemy_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+else()
+    add_library(raw_alchemy_core STATIC ${RA_LIBRARY_SOURCES})
+endif()
+
+# Shared library specific settings
+if(BUILD_SHARED)
+    target_compile_definitions(raw_alchemy_core
+        PRIVATE RA_BUILDING_SHARED
+        PUBLIC RA_SHARED
+    )
+    # All symbols visible by default — C++ symbols for internal linking, C API for FFI
+    set_target_properties(raw_alchemy_core PROPERTIES
+        CXX_VISIBILITY_PRESET default
+        VISIBILITY_INLINES_HIDDEN OFF
+    )
+    # Windows: generate .lib import library alongside .dll
+    if(WIN32)
+        set_target_properties(raw_alchemy_core PROPERTIES
+            WINDOWS_EXPORT_ALL_SYMBOLS OFF
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+        )
+    endif()
+    # Android: set library output name
+    if(ANDROID)
+        set_target_properties(raw_alchemy_core PROPERTIES
+            OUTPUT_NAME "raw_alchemy"
+        )
+    endif()
+    # Version the shared library (Linux/macOS)
+    if(UNIX AND NOT ANDROID)
+        set_target_properties(raw_alchemy_core PROPERTIES
+            VERSION ${PROJECT_VERSION}
+            SOVERSION ${PROJECT_VERSION_MAJOR}
+        )
+    endif()
+endif()
 
 target_include_directories(raw_alchemy_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -258,12 +318,14 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 # ---- CLI executable ----
-add_executable(raw_alchemy_cli src/main.cpp)
-target_link_libraries(raw_alchemy_cli PRIVATE raw_alchemy_core)
+if(BUILD_CLI)
+    add_executable(raw_alchemy_cli src/main.cpp)
+    target_link_libraries(raw_alchemy_cli PRIVATE raw_alchemy_core)
 
-# ---- Verification tool ----
-add_executable(raw_alchemy_verify src/verify.cpp)
-target_link_libraries(raw_alchemy_verify PRIVATE raw_alchemy_core)
+    # ---- Verification tool ----
+    add_executable(raw_alchemy_verify src/verify.cpp)
+    target_link_libraries(raw_alchemy_verify PRIVATE raw_alchemy_core)
+endif()
 
 # ---- Compiler warnings ----
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -275,6 +337,9 @@ endif()
 message(STATUS "")
 message(STATUS "=== Raw Alchemy (C++ Edition) ===")
 message(STATUS "  Version:    ${PROJECT_VERSION}")
+message(STATUS "  Shared:     ${BUILD_SHARED}")
+message(STATUS "  C API:      ${BUILD_CAPI}")
+message(STATUS "  CLI:        ${BUILD_CLI}")
 message(STATUS "  LibRaw:     ${RA_LIBRAW_SOURCE}")
 message(STATUS "  libtiff:    ${RA_LIBTIFF_SOURCE}")
 message(STATUS "  JPEG:       ${RA_LIBJPEG_SOURCE}")
@@ -283,5 +348,8 @@ message(STATUS "  Lensfun:    ${RA_LENSFUN_ENABLED}")
         message(STATUS "             ${RA_LENSFUN_SOURCE}")
     endif()
 message(STATUS "  OpenMP:     ${OpenMP_CXX_FOUND}")
+if(ANDROID)
+    message(STATUS "  Android:    ${ANDROID_ABI} (API ${ANDROID_PLATFORM_LEVEL})")
+endif()
 message(STATUS "=================================")
 message(STATUS "")

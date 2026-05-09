@@ -1,0 +1,22 @@
+# Android armeabi-v7a preset
+# Usage: cmake -B build-android-armv7 -C toolchains/android-armv7.cmake
+
+set(CMAKE_SYSTEM_NAME Android)
+set(CMAKE_SYSTEM_PROCESSOR armv7-a)
+set(ANDROID_ABI armeabi-v7a)
+set(ANDROID_PLATFORM android-21)
+
+if(DEFINED ENV{ANDROID_NDK})
+    set(CMAKE_ANDROID_NDK $ENV{ANDROID_NDK} CACHE PATH "Android NDK")
+elseif(NOT DEFINED CMAKE_ANDROID_NDK)
+    message(FATAL_ERROR "Set ANDROID_NDK env var or pass -DANDROID_NDK=/path/to/ndk")
+endif()
+
+set(CMAKE_ANDROID_ARCH_ABI ${ANDROID_ABI})
+set(CMAKE_ANDROID_NDK_TOOLCHAIN_VERSION clang)
+
+set(BUILD_SHARED ON CACHE BOOL "" FORCE)
+set(BUILD_CAPI ON CACHE BOOL "" FORCE)
+set(BUILD_CLI OFF CACHE BOOL "" FORCE)
+set(ENABLE_LENS_CORRECTION ON CACHE BOOL "" FORCE)
+set(WITH_SIMD OFF CACHE BOOL "" FORCE)
