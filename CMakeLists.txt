@@ -185,8 +185,6 @@ ExternalProject_Add(libjpeg-turbo_external
     $<$<BOOL:${ANDROID_ABI}>:-DANDROID_ABI=${ANDROID_ABI}>
     $<$<BOOL:${ANDROID_PLATFORM}>:-DANDROID_PLATFORM=${ANDROID_PLATFORM}>
     $<$<BOOL:${ANDROID_NDK}>:-DANDROID_NDK=${ANDROID_NDK}>
-    $<$<STREQUAL:${ANDROID_ABI},arm64-v8a>:-DWITH_SIMD=OFF>
-    $<$<NOT:$<STREQUAL:${ANDROID_ABI},arm64-v8a>>:-DWITH_SIMD=ON>
     BUILD_BYPRODUCTS ${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}${TURBOJPEG_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}
 )
 
@@ -441,9 +439,14 @@ if(BUILD_CLI)
     endif()
 endif()
 
-# ---- Compiler warnings ----
+# ---- Compiler warnings & optimization ----
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O2)
+    if(ANDROID OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|armv7-a|arm64")
+        # -O3 enables auto-vectorization (NEON on ARM); safe for floating-point image processing
+        target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O3)
+    else()
+        target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O2)
+    endif()
 endif()
 
 # ---- Status ----
