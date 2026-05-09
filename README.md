@@ -381,19 +381,19 @@ raw_alchemy_cli <input.raw> <output> [--log-space <space>] [options]
 
 ```bash
 # 完整管线：RAW 解码 → 镜头校正 → 高光安全自动曝光 → Log 编码 → LUT 调色 → JPEG 输出
-raw_alchemy_cli photo.NEF result.jpg \
-    --log-space F-Log2 \
-    --lut FLog2_to_CLASSIC-Neg.cube \
+raw_alchemy_cli Sample.NEF result.jpg \
+    --log-space F-Log2C \
+    --lut FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube \
     --metering highlight-safe \
     --jpeg-quality 95
 ```
 
 该命令执行以下管线：
 
-1. 解码 `photo.NEF` 至 ProPhoto RGB 线性空间
+1. 解码 `Sample.NEF` 至 ProPhoto RGB 线性空间
 2. 应用镜头校正（畸变、色差、暗角）
 3. 使用高光安全测光自动设置曝光
-4. 色域变换至 F-Gamut + F-Log2 曲线编码
+4. 色域变换至 F-Gamut C + F-Log2C 曲线编码
 5. 应用 `.cube` LUT 进行创意调色
 6. 输出 8-bit JPEG（质量 95）
 
@@ -421,16 +421,16 @@ raw_alchemy_verify output.tif
 #include "raw_alchemy_capi.h"
 
 RaResult result = raProcessFile(
-    "photo.NEF",          // 输入 RAW 文件
-    "output.tif",         // 输出文件
-    "F-Log2",             // Log 空间 (NULL = 跳过)
-    "style.cube",         // LUT 文件 (NULL = 跳过)
-    "matrix",             // 测光模式 (NULL = 默认 matrix)
-    0.0f,                 // manualEv (useAutoExposure≠0 时忽略)
-    1,                    // useAutoExposure (非0 = 自动)
-    95,                   // JPEG 质量 (1-100)
-    1,                    // 启用镜头校正
-    NULL                  // 自定义 Lensfun DB (NULL = 系统默认)
+    "Sample.NEF",                                              // 输入 RAW 文件
+    "output.tif",                                              // 输出文件
+    "F-Log2C",                                                 // Log 空间 (NULL = 跳过)
+    "FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube",               // LUT 文件 (NULL = 跳过)
+    "matrix",                                                  // 测光模式 (NULL = 默认 matrix)
+    0.0f,                                                      // manualEv (useAutoExposure≠0 时忽略)
+    1,                                                         // useAutoExposure (非0 = 自动)
+    95,                                                        // JPEG 质量 (1-100)
+    1,                                                         // 启用镜头校正
+    NULL                                                       // 自定义 Lensfun DB (NULL = 系统默认)
 );
 
 if (result != RA_OK) {
@@ -443,7 +443,9 @@ if (result != RA_OK) {
 ```c
 RaImageBuffer buf = NULL;
 RaResult result = raProcessToBuffer(
-    "photo.NEF", "S-Log3", NULL, "matrix",
+    "Sample.NEF", "F-Log2C",
+    "FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube",
+    "matrix",
     0.0f, 1, 1, NULL, &buf
 );
 
