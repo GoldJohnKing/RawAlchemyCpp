@@ -10,6 +10,12 @@
 #define GETTEXT_PACKAGE "libexif"
 #define LOCALEDIR ""
 
+// MSVC does not provide ssize_t (POSIX type)
+#ifdef _MSC_VER
+#include <BaseTsd.h>
+typedef SSIZE_T ssize_t;
+#endif
+
 @endianness_def@
 
 #endif /* _LIBEXIF_CONFIG_H */
