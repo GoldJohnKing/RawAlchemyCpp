@@ -32,6 +32,12 @@ set(ENABLE_RAWSPEED OFF CACHE BOOL "" FORCE)
 set(LIBRAW_INSTALL  OFF CACHE BOOL "" FORCE)
 add_subdirectory(third_party/LibRaw-cmake)
 
+# Windows: enable Unicode path support in LibRaw (wide-char _wfopen)
+if(WIN32)
+    target_compile_definitions(raw_r PUBLIC LIBRAW_WIN32_UNICODEPATHS LIBRAW_WIN32_CALLS WIN32SECURECALLS)
+    target_compile_definitions(raw PUBLIC LIBRAW_WIN32_UNICODEPATHS LIBRAW_WIN32_CALLS WIN32SECURECALLS)
+endif()
+
 set(RA_LIBRAW_TARGET libraw::libraw_r)
 set(RA_LIBRAW_SOURCE "submodule (LibRaw)")
 

@@ -30,6 +30,21 @@
 #include <cstdio>
 #include <cstring>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+namespace {
+    std::wstring utf8_to_wide(const std::string& utf8) {
+        if (utf8.empty()) return std::wstring();
+        int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+        if (size <= 0) return std::wstring();
+        std::wstring wide(static_cast<size_t>(size - 1), 0);
+        MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], size);
+        return wide;
+    }
+}
+#endif
+
 namespace rawalchemy {
 
 // ---- Error helper ----
@@ -90,7 +105,12 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     // --- Open the RAW file ---
+#ifdef _WIN32
+    auto widePath = utf8_to_wide(rawPath);
+    int ret = rawProcessor.open_file(widePath.c_str());
+#else
     int ret = rawProcessor.open_file(rawPath.c_str());
+#endif
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "open_file");
     }
@@ -187,7 +207,12 @@ CameraMetadata extractMetadata(const std::string& rawPath) {
     CameraMetadata meta;
     LibRaw rawProcessor;
 
+#ifdef _WIN32
+    auto widePath = utf8_to_wide(rawPath);
+    int ret = rawProcessor.open_file(widePath.c_str());
+#else
     int ret = rawProcessor.open_file(rawPath.c_str());
+#endif
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "open_file (metadata)");
     }

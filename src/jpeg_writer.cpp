@@ -18,6 +18,11 @@
 #include <vector>
 #include <algorithm>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include <turbojpeg.h>
 
 namespace rawalchemy {
@@ -96,6 +101,8 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
     const uint8_t* writeData;
     size_t writeSize;
 
+    FILE* fp = nullptr;
+
     if (exifData && !exifData->empty()) {
         finalJpeg = rawalchemy::injectExifIntoJpeg(jpegBuf, jpegSize, *exifData);
         writeData = finalJpeg.data();
@@ -105,7 +112,16 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
         writeSize = jpegSize;
     }
 
-    FILE* fp = fopen(outPath.c_str(), "wb");
+#ifdef _WIN32
+    {
+        int size = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
+        std::wstring wpath(static_cast<size_t>(size - 1), 0);
+        MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], size);
+        fp = _wfopen(wpath.c_str(), L"wb");
+    }
+#else
+    fp = fopen(outPath.c_str(), "wb");
+#endif
     if (!fp) {
         fprintf(stderr, "[JpegWriter] Failed to open output file: %s\n", outPath.c_str());
         tj3Free(jpegBuf);
