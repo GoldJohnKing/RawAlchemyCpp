@@ -108,8 +108,7 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
                      const char* logSpace,
                      const char* lutPath,
                      const char* metering,
-                     float manualEv,
-                     int useAutoExposure,
+                     float evOffset,
                      int enableLensCorrection,
                      const char* customLensfunDb) {
     #if defined(__aarch64__)
@@ -134,19 +133,15 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
         }
     }
 
-    // Exposure
+    // Exposure: auto-meter with offset
     try {
-        if (useAutoExposure) {
-            std::string mode(metering ? metering : "matrix");
-            if (!rawalchemy::isMeteringModeSupported(mode)) {
-                setError(std::string("Unsupported metering mode: ") + mode);
-                return RA_ERR_INVALID_PARAM;
-            }
-            float gain = rawalchemy::computeAutoGain(img, mode);
-            img.applyGain(gain);
-        } else {
-            img.applyGain(std::pow(2.0f, manualEv));
+        std::string mode(metering ? metering : "matrix");
+        if (!rawalchemy::isMeteringModeSupported(mode)) {
+            setError(std::string("Unsupported metering mode: ") + mode);
+            return RA_ERR_INVALID_PARAM;
         }
+        float gain = rawalchemy::computeAutoGain(img, mode);
+        img.applyGain(gain * std::pow(2.0f, evOffset));
     } catch (...) {
         return catchExceptions("exposure");
     }
@@ -214,8 +209,7 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
                             const char* logSpace,
                             const rawalchemy::LUT3D* lut,
                             const char* metering,
-                            float manualEv,
-                            int useAutoExposure,
+                            float evOffset,
                             int enableLensCorrection,
                             const char* customLensfunDb) {
     #if defined(__aarch64__)
@@ -239,19 +233,15 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
         }
     }
 
-    // Exposure
+    // Exposure: auto-meter with offset
     try {
-        if (useAutoExposure) {
-            std::string mode(metering ? metering : "matrix");
-            if (!rawalchemy::isMeteringModeSupported(mode)) {
-                setError(std::string("Unsupported metering mode: ") + mode);
-                return RA_ERR_INVALID_PARAM;
-            }
-            float gain = rawalchemy::computeAutoGain(img, mode);
-            img.applyGain(gain);
-        } else {
-            img.applyGain(std::pow(2.0f, manualEv));
+        std::string mode(metering ? metering : "matrix");
+        if (!rawalchemy::isMeteringModeSupported(mode)) {
+            setError(std::string("Unsupported metering mode: ") + mode);
+            return RA_ERR_INVALID_PARAM;
         }
+        float gain = rawalchemy::computeAutoGain(img, mode);
+        img.applyGain(gain * std::pow(2.0f, evOffset));
     } catch (...) {
         return catchExceptions("exposure");
     }
@@ -320,27 +310,22 @@ RaResult runGradingOnly(
     const char* logSpace,
     const rawalchemy::LUT3D* lut,
     const char* metering,
-    float manualEv,
-    int useAutoExposure)
+    float evOffset)
 {
     #if defined(__aarch64__)
     rawalchemy::HalfImageBuffer imgF16;
     bool usingF16 = false;
     #endif
 
-    // Exposure
+    // Exposure: auto-meter with offset
     try {
-        if (useAutoExposure) {
-            std::string mode(metering ? metering : "matrix");
-            if (!rawalchemy::isMeteringModeSupported(mode)) {
-                setError(std::string("Unsupported metering mode: ") + mode);
-                return RA_ERR_INVALID_PARAM;
-            }
-            float gain = rawalchemy::computeAutoGain(img, mode);
-            img.applyGain(gain);
-        } else {
-            img.applyGain(std::pow(2.0f, manualEv));
+        std::string mode(metering ? metering : "matrix");
+        if (!rawalchemy::isMeteringModeSupported(mode)) {
+            setError(std::string("Unsupported metering mode: ") + mode);
+            return RA_ERR_INVALID_PARAM;
         }
+        float gain = rawalchemy::computeAutoGain(img, mode);
+        img.applyGain(gain * std::pow(2.0f, evOffset));
     } catch (...) {
         return catchExceptions("exposure");
     }
@@ -413,8 +398,7 @@ RA_API RaResult RA_CALL raProcessFile(
     const char* logSpace,
     const char* lutPath,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
     const char* customLensfunDb
@@ -444,7 +428,7 @@ RA_API RaResult RA_CALL raProcessFile(
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,
-                                   manualEv, useAutoExposure,
+                                   evOffset,
                                    enableLensCorrection, customLensfunDb);
         if (res != RA_OK) {
             if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
@@ -484,8 +468,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     const float* lutDomainMin,
     const float* lutDomainMax,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
     const char* customLensfunDb
@@ -530,7 +513,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         }
 
         RaResult res = runPipelineWithLUT(img, meta, logSpace, lutPtr, metering,
-                                   manualEv, useAutoExposure,
+                                   evOffset,
                                    enableLensCorrection, customLensfunDb);
         if (res != RA_OK) {
             if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
@@ -566,8 +549,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     const char* logSpace,
     const char* lutPath,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         enableLensCorrection,
     const char* customLensfunDb,
     RaImageBuffer* outBuf
@@ -587,7 +569,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,
-                                   manualEv, useAutoExposure,
+                                   evOffset,
                                    enableLensCorrection, customLensfunDb);
         if (res != RA_OK) return res;
 
@@ -705,8 +687,7 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
     const float*     lutDomainMin,
     const float*     lutDomainMax,
     const char*      metering,
-    float            manualEv,
-    int              useAutoExposure,
+    float            evOffset,
     int              jpegQuality,
     const char*      outputPath)
 {
@@ -742,7 +723,7 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
         }
 
         RaResult res = runGradingOnly(img, logSpace, lutPtr, metering,
-                                       manualEv, useAutoExposure);
+                                       evOffset);
         if (res != RA_OK) return res;
 
         bool ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false, nullptr);

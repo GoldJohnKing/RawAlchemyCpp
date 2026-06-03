@@ -82,8 +82,7 @@ RA_API int RA_CALL raImageGetDataSizeBytes(RaImageBuffer buf);
  *  @param logSpace    Log space name, or NULL to skip log transform.
  *  @param lutPath     Path to .cube LUT file, or NULL to skip LUT.
  *  @param metering    Metering mode, or NULL for "matrix".
- *  @param manualEv    Manual exposure in stops. Ignored if useAutoExposure != 0.
- *  @param useAutoExposure  If non-zero, use auto metering; else use manualEv.
+ *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param jpegQuality JPEG quality 1-100 (only used for JPEG output).
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
@@ -94,8 +93,7 @@ RA_API RaResult RA_CALL raProcessFile(
     const char* logSpace,
     const char* lutPath,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
     const char* customLensfunDb
@@ -117,8 +115,7 @@ RA_API RaResult RA_CALL raProcessFile(
  *  @param lutDomainMin  LUT domain minimum [R, G, B]. Pass NULL for default {0,0,0}.
  *  @param lutDomainMax  LUT domain maximum [R, G, B]. Pass NULL for default {1,1,1}.
  *  @param metering    Metering mode, or NULL for "matrix".
- *  @param manualEv    Manual exposure in stops.
- *  @param useAutoExposure  If non-zero, use auto metering.
+ *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param jpegQuality JPEG quality 1-100.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
@@ -132,8 +129,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     const float* lutDomainMin,
     const float* lutDomainMax,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
     const char* customLensfunDb
@@ -148,8 +144,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
  *  @param logSpace    Log space name, or NULL to skip.
  *  @param lutPath     Path to .cube LUT, or NULL to skip.
  *  @param metering    Metering mode, or NULL for "matrix".
- *  @param manualEv    Manual exposure. Ignored if useAutoExposure != 0.
- *  @param useAutoExposure  If non-zero, use auto metering.
+ *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
  *  @param outBuf      Receives the processed image. Caller must destroy.
@@ -159,8 +154,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     const char* logSpace,
     const char* lutPath,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         enableLensCorrection,
     const char* customLensfunDb,
     RaImageBuffer* outBuf
@@ -205,8 +199,7 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
  *  @param lutDomainMin    LUT domain min [R,G,B], or NULL for {0,0,0}.
  *  @param lutDomainMax    LUT domain max [R,G,B], or NULL for {1,1,1}.
  *  @param metering        Metering mode, or NULL for "matrix".
- *  @param manualEv        Manual exposure in stops.
- *  @param useAutoExposure If non-zero, use auto metering.
+ *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param jpegQuality     JPEG quality 1-100.
  *  @param outputPath      UTF-8 output path.
  *  @return RA_OK on success. */
@@ -218,8 +211,7 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
     const float*     lutDomainMin,
     const float*     lutDomainMax,
     const char*      metering,
-    float            manualEv,
-    int              useAutoExposure,
+    float            evOffset,
     int              jpegQuality,
     const char*      outputPath
 );
