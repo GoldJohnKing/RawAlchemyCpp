@@ -224,6 +224,24 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
     const char*      outputPath
 );
 
+/** Toggle lens correction for an existing preview session.
+ *
+ *  If enabling and the corrected buffer has not been computed yet,
+ *  lens correction is applied to a clone of the decoded image and cached
+ *  (lazy-loaded, ~200-500ms on first call).
+ *  If the corrected buffer is already cached, switching is instantaneous.
+ *  Disabling is always instantaneous.
+ *
+ *  @param session         Active preview session.
+ *  @param enable          If non-zero, use lens-corrected buffer.
+ *  @param customLensfunDb Custom Lensfun DB path, or NULL.
+ *  @return RA_OK on success. */
+RA_API RaResult RA_CALL raToggleLensCorrection(
+    RaPreviewSession session,
+    int              enable,
+    const char*      customLensfunDb
+);
+
 /** End a preview session and release all cached resources.
  *  Safe to pass NULL (no-op). */
 RA_API void RA_CALL raEndPreviewSession(RaPreviewSession session);

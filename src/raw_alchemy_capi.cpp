@@ -63,8 +63,10 @@ struct RaImageBuffer_ {
 };
 
 struct RaPreviewSession_ {
-    rawalchemy::ImageBuffer decodedImage;   // post-lens-correction, pre-grading
+    rawalchemy::ImageBuffer decodedImage;   // raw decode (uncorrected), never modified
+    rawalchemy::ImageBuffer correctedImage; // lens-corrected, lazy-loaded (empty until computed)
     std::string inputPath;
+    bool useCorrected;                      // selects active buffer for grading
 };
 
 // ----------------------------------------------------------------
@@ -626,10 +628,12 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
 
     try {
         auto img = rawalchemy::decodeRaw(std::string(inputPath));
-        auto meta = rawalchemy::extractMetadata(std::string(inputPath));
+        rawalchemy::ImageBuffer correctedImg;
 
         if (enableLensCorrection) {
             try {
+                auto meta = rawalchemy::extractMetadata(std::string(inputPath));
+                correctedImg = img;
                 rawalchemy::LensCorrectionParams lcParams;
                 lcParams.enabled = true;
                 lcParams.correctDistortion = true;
@@ -637,7 +641,7 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
                 lcParams.correctVignetting = true;
                 lcParams.distance = 1000.0f;
                 if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
-                rawalchemy::applyLensCorrection(img, meta, lcParams);
+                rawalchemy::applyLensCorrection(correctedImg, meta, lcParams);
             } catch (...) {
                 return catchExceptions("lens correction");
             }
@@ -645,12 +649,51 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
 
         *outSession = new RaPreviewSession_{
             std::move(img),
-            std::string(inputPath)
+            std::move(correctedImg),
+            std::string(inputPath),
+            enableLensCorrection != 0
         };
         return RA_OK;
     } catch (...) {
         return catchExceptions("raBeginPreviewSession");
     }
+}
+
+RA_API RaResult RA_CALL raToggleLensCorrection(
+    RaPreviewSession session,
+    int              enable,
+    const char*      customLensfunDb)
+{
+    if (!session) {
+        setError("raToggleLensCorrection: null session");
+        return RA_ERR_INVALID_PARAM;
+    }
+    clearError();
+
+    if (enable) {
+        session->useCorrected = true;
+        if (session->correctedImage.width == 0) {
+            try {
+                auto meta = rawalchemy::extractMetadata(session->inputPath);
+                session->correctedImage = session->decodedImage;
+                rawalchemy::LensCorrectionParams lcParams;
+                lcParams.enabled = true;
+                lcParams.correctDistortion = true;
+                lcParams.correctTca = true;
+                lcParams.correctVignetting = true;
+                lcParams.distance = 1000.0f;
+                if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
+                rawalchemy::applyLensCorrection(session->correctedImage, meta, lcParams);
+            } catch (...) {
+                session->useCorrected = false;
+                return catchExceptions("lens correction");
+            }
+        }
+    } else {
+        session->useCorrected = false;
+    }
+
+    return RA_OK;
 }
 
 RA_API RaResult RA_CALL raApplyPreviewGrading(
@@ -673,8 +716,9 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
     clearError();
 
     try {
-        // Clone the cached decoded image so the original is preserved
-        auto img = session->decodedImage;
+        // Select source buffer based on lens correction state
+        auto& source = session->useCorrected ? session->correctedImage : session->decodedImage;
+        auto img = source;
 
         // Build LUT from pre-parsed data
         rawalchemy::LUT3D lut;
