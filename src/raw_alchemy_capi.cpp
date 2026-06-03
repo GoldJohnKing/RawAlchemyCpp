@@ -685,6 +685,7 @@ RA_API RaResult RA_CALL raToggleLensCorrection(
                 if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
                 rawalchemy::applyLensCorrection(session->correctedImage, meta, lcParams);
             } catch (...) {
+                session->correctedImage = rawalchemy::ImageBuffer{};
                 session->useCorrected = false;
                 return catchExceptions("lens correction");
             }
