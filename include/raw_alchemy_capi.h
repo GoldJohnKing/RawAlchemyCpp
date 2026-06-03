@@ -167,6 +167,68 @@ RA_API RaResult RA_CALL raProcessToBuffer(
 );
 
 /* ----------------------------------------------------------------
+ *  Preview Session — two-phase preview pipeline
+ *
+ *  Decodes RAW + applies lens correction once, then allows fast
+ *  re-grading with different LUT/exposure parameters.
+ * ---------------------------------------------------------------- */
+typedef struct RaPreviewSession_* RaPreviewSession;
+
+/** Decode a RAW file and apply lens correction, caching the result for
+ *  fast re-grading.  Call raEndPreviewSession when done.
+ *
+ *  @param inputPath           UTF-8 path to input RAW file.
+ *  @param enableLensCorrection  If non-zero, apply lens correction.
+ *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
+ *  @param outSession          Receives the session handle.
+ *  @return RA_OK on success. */
+RA_API RaResult RA_CALL raBeginPreviewSession(
+    const char* inputPath,
+    int         enableLensCorrection,
+    const char* customLensfunDb,
+    RaPreviewSession* outSession
+);
+
+/** Apply grading parameters to the session's cached decoded image.
+ *
+ *  The session's internal data is NOT modified — safe to call repeatedly
+ *  with different parameters.  Internally clones the cached buffer, applies
+ *  the full grading pipeline, and writes the result to outputPath.
+ *
+ *  Pipeline on cloned data:
+ *    Exposure -> Sat/Contrast Boost -> Log Transform -> LUT -> JPEG encode
+ *
+ *  @param session         Active preview session.
+ *  @param logSpace        Log space name, or NULL to skip.
+ *  @param lutTable        Pre-parsed LUT float data [size^3 x 3], or NULL.
+ *  @param lutSize         LUT dimension. Ignored if lutTable is NULL.
+ *  @param lutDomainMin    LUT domain min [R,G,B], or NULL for {0,0,0}.
+ *  @param lutDomainMax    LUT domain max [R,G,B], or NULL for {1,1,1}.
+ *  @param metering        Metering mode, or NULL for "matrix".
+ *  @param manualEv        Manual exposure in stops.
+ *  @param useAutoExposure If non-zero, use auto metering.
+ *  @param jpegQuality     JPEG quality 1-100.
+ *  @param outputPath      UTF-8 output path.
+ *  @return RA_OK on success. */
+RA_API RaResult RA_CALL raApplyPreviewGrading(
+    RaPreviewSession session,
+    const char*      logSpace,
+    const float*     lutTable,
+    int              lutSize,
+    const float*     lutDomainMin,
+    const float*     lutDomainMax,
+    const char*      metering,
+    float            manualEv,
+    int              useAutoExposure,
+    int              jpegQuality,
+    const char*      outputPath
+);
+
+/** End a preview session and release all cached resources.
+ *  Safe to pass NULL (no-op). */
+RA_API void RA_CALL raEndPreviewSession(RaPreviewSession session);
+
+/* ----------------------------------------------------------------
  *  Utility
  * ---------------------------------------------------------------- */
 

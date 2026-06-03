@@ -62,6 +62,11 @@ struct RaImageBuffer_ {
     rawalchemy::ImageBuffer img;
 };
 
+struct RaPreviewSession_ {
+    rawalchemy::ImageBuffer decodedImage;   // post-lens-correction, pre-grading
+    std::string inputPath;
+};
+
 // ----------------------------------------------------------------
 //  Handle Lifecycle
 // ----------------------------------------------------------------
@@ -306,6 +311,94 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
     return RA_OK;
 }
 
+/// Apply grading pipeline (exposure -> sat/contrast -> log -> LUT) to an image.
+/// Does NOT decode or apply lens correction — used for preview re-grading.
+RaResult runGradingOnly(
+    rawalchemy::ImageBuffer& img,
+    const char* logSpace,
+    const rawalchemy::LUT3D* lut,
+    const char* metering,
+    float manualEv,
+    int useAutoExposure)
+{
+    #if defined(__aarch64__)
+    rawalchemy::HalfImageBuffer imgF16;
+    bool usingF16 = false;
+    #endif
+
+    // Exposure
+    try {
+        if (useAutoExposure) {
+            std::string mode(metering ? metering : "matrix");
+            if (!rawalchemy::isMeteringModeSupported(mode)) {
+                setError(std::string("Unsupported metering mode: ") + mode);
+                return RA_ERR_INVALID_PARAM;
+            }
+            float gain = rawalchemy::computeAutoGain(img, mode);
+            img.applyGain(gain);
+        } else {
+            img.applyGain(std::pow(2.0f, manualEv));
+        }
+    } catch (...) {
+        return catchExceptions("exposure");
+    }
+
+    // Saturation / Contrast boost
+    try {
+        rawalchemy::applySaturationContrast(img, 1.25f, 1.10f);
+    } catch (...) {
+        return catchExceptions("saturation/contrast");
+    }
+
+    // Log transform
+    if (logSpace) {
+        try {
+            std::string space(logSpace);
+            if (!rawalchemy::isLogSpaceSupported(space)) {
+                setError(std::string("Unsupported log space: ") + logSpace);
+                return RA_ERR_LOG_UNSUPPORTED;
+            }
+            rawalchemy::applyGamutTransform(img, space);
+
+            #if defined(__aarch64__)
+            imgF16 = rawalchemy::convertToF16(img);
+            rawalchemy::applyLogEncodingF16(imgF16, space);
+            usingF16 = true;
+            #else
+            rawalchemy::applyLogEncoding(img, space);
+            #endif
+        } catch (...) {
+            return catchExceptions("log transform");
+        }
+    }
+
+    // LUT
+    if (lut && !lut->empty()) {
+        try {
+            #if defined(__aarch64__)
+            if (usingF16) {
+                rawalchemy::applyLUT3DF16(imgF16, *lut);
+            } else {
+                rawalchemy::applyLUT3D(img, *lut);
+            }
+            #else
+            rawalchemy::applyLUT3D(img, *lut);
+            #endif
+        } catch (...) {
+            return catchExceptions("LUT");
+        }
+    }
+
+    // Convert back from float16 before output
+    #if defined(__aarch64__)
+    if (usingF16) {
+        img = rawalchemy::convertToF32(imgF16);
+    }
+    #endif
+
+    return RA_OK;
+}
+
 } // anonymous namespace
 
 // ----------------------------------------------------------------
@@ -513,4 +606,111 @@ RA_API const char* RA_CALL raGetLastError(void) {
 
 RA_API const char* RA_CALL raGetVersion(void) {
     return "0.1.0";
+}
+
+// ----------------------------------------------------------------
+//  Preview Session
+// ----------------------------------------------------------------
+
+RA_API RaResult RA_CALL raBeginPreviewSession(
+    const char* inputPath,
+    int         enableLensCorrection,
+    const char* customLensfunDb,
+    RaPreviewSession* outSession)
+{
+    if (!inputPath || !outSession) {
+        setError("raBeginPreviewSession: null parameter");
+        return RA_ERR_INVALID_PARAM;
+    }
+    clearError();
+
+    try {
+        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        auto meta = rawalchemy::extractMetadata(std::string(inputPath));
+
+        if (enableLensCorrection) {
+            try {
+                rawalchemy::LensCorrectionParams lcParams;
+                lcParams.enabled = true;
+                lcParams.correctDistortion = true;
+                lcParams.correctTca = true;
+                lcParams.correctVignetting = true;
+                lcParams.distance = 1000.0f;
+                if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
+                rawalchemy::applyLensCorrection(img, meta, lcParams);
+            } catch (...) {
+                return catchExceptions("lens correction");
+            }
+        }
+
+        *outSession = new RaPreviewSession_{
+            std::move(img),
+            std::string(inputPath)
+        };
+        return RA_OK;
+    } catch (...) {
+        return catchExceptions("raBeginPreviewSession");
+    }
+}
+
+RA_API RaResult RA_CALL raApplyPreviewGrading(
+    RaPreviewSession session,
+    const char*      logSpace,
+    const float*     lutTable,
+    int              lutSize,
+    const float*     lutDomainMin,
+    const float*     lutDomainMax,
+    const char*      metering,
+    float            manualEv,
+    int              useAutoExposure,
+    int              jpegQuality,
+    const char*      outputPath)
+{
+    if (!session || !outputPath) {
+        setError("raApplyPreviewGrading: null parameter");
+        return RA_ERR_INVALID_PARAM;
+    }
+    clearError();
+
+    try {
+        // Clone the cached decoded image so the original is preserved
+        auto img = session->decodedImage;
+
+        // Build LUT from pre-parsed data
+        rawalchemy::LUT3D lut;
+        const rawalchemy::LUT3D* lutPtr = nullptr;
+        if (lutTable && lutSize > 0) {
+            lut.size = lutSize;
+            int totalFloats = lutSize * lutSize * lutSize * 3;
+            lut.table.assign(lutTable, lutTable + totalFloats);
+            if (lutDomainMin) {
+                lut.domainMin[0] = lutDomainMin[0];
+                lut.domainMin[1] = lutDomainMin[1];
+                lut.domainMin[2] = lutDomainMin[2];
+            }
+            if (lutDomainMax) {
+                lut.domainMax[0] = lutDomainMax[0];
+                lut.domainMax[1] = lutDomainMax[1];
+                lut.domainMax[2] = lutDomainMax[2];
+            }
+            lutPtr = &lut;
+        }
+
+        RaResult res = runGradingOnly(img, logSpace, lutPtr, metering,
+                                       manualEv, useAutoExposure);
+        if (res != RA_OK) return res;
+
+        bool ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false, nullptr);
+        if (!ok) {
+            setError("Failed to write preview JPEG");
+            return RA_ERR_WRITE_FAILED;
+        }
+        return RA_OK;
+    } catch (...) {
+        return catchExceptions("raApplyPreviewGrading");
+    }
+}
+
+RA_API void RA_CALL raEndPreviewSession(RaPreviewSession session) {
+    delete session;
 }
