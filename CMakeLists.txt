@@ -334,6 +334,7 @@ set(RA_LIBRARY_SOURCES
     src/raw_decoder.cpp
     src/tiff_writer.cpp
     src/jpeg_writer.cpp
+    src/image_resize.cpp
     src/log_transform.cpp
     src/lut_applier.cpp
     src/metering.cpp

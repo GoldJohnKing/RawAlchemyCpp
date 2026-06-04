@@ -14,6 +14,7 @@
 #include "jpeg_writer.h"
 #include "lens_correction.h"
 #include "exif_injector.h"
+#include "image_resize.h"
 
 #if defined(__aarch64__)
 #include "half_buffer.h"
@@ -689,16 +690,20 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
     const char*      metering,
     float            evOffset,
     int              jpegQuality,
-    const char*      outputPath)
+    int              maxWidth,
+    int              maxHeight,
+    unsigned char**  outBuffer,
+    int*             outLen)
 {
-    if (!session || !outputPath) {
+    if (!session || !outBuffer || !outLen) {
         setError("raApplyPreviewGrading: null parameter");
         return RA_ERR_INVALID_PARAM;
     }
     clearError();
+    *outBuffer = nullptr;
+    *outLen = 0;
 
     try {
-        // Select source buffer based on lens correction state
         auto& source = session->useCorrected ? session->correctedImage : session->decodedImage;
         auto img = source;
 
@@ -722,19 +727,32 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
             lutPtr = &lut;
         }
 
-        RaResult res = runGradingOnly(img, logSpace, lutPtr, metering,
-                                       evOffset);
+        RaResult res = runGradingOnly(img, logSpace, lutPtr, metering, evOffset);
         if (res != RA_OK) return res;
 
-        bool ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false, nullptr);
-        if (!ok) {
-            setError("Failed to write preview JPEG");
+        // Resize to fit screen dimensions
+        img = rawalchemy::resizeImage(img, maxWidth, maxHeight);
+
+        // Encode to memory buffer
+        std::vector<uint8_t> jpegBytes = rawalchemy::writeJpegToBuffer(img, jpegQuality, false, nullptr);
+        if (jpegBytes.empty()) {
+            setError("Failed to encode preview JPEG");
             return RA_ERR_WRITE_FAILED;
         }
+
+        size_t len = jpegBytes.size();
+        unsigned char* buf = new unsigned char[len];
+        std::memcpy(buf, jpegBytes.data(), len);
+        *outBuffer = buf;
+        *outLen = static_cast<int>(len);
         return RA_OK;
     } catch (...) {
         return catchExceptions("raApplyPreviewGrading");
     }
+}
+
+RA_API void RA_CALL raFreePreviewBuffer(unsigned char* buffer) {
+    delete[] buffer;
 }
 
 RA_API void RA_CALL raEndPreviewSession(RaPreviewSession session) {

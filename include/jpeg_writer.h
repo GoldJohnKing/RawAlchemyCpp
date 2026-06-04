@@ -20,6 +20,13 @@
 
 namespace rawalchemy {
 
+/** Encode an ImageBuffer to JPEG in memory, returning the bytes via vector.
+ *  Same parameters as writeJpeg but writes to a std::vector instead of a file. */
+std::vector<uint8_t> writeJpegToBuffer(const ImageBuffer& img,
+                                       int quality = 95,
+                                       bool optimize = false,
+                                       const std::vector<uint8_t>* exifData = nullptr);
+
 /**
  * @brief Save an ImageBuffer as an 8-bit JPEG file.
  *

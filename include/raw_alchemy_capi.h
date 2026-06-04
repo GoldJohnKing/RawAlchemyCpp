@@ -187,10 +187,13 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
  *
  *  The session's internal data is NOT modified — safe to call repeatedly
  *  with different parameters.  Internally clones the cached buffer, applies
- *  the full grading pipeline, and writes the result to outputPath.
+ *  the full grading pipeline, resizes to fit maxWidth×maxHeight, and JPEG-encodes
+ *  to memory.
+ *
+ *  Buffer is allocated internally and must be freed by the caller with raFreePreviewBuffer.
  *
  *  Pipeline on cloned data:
- *    Exposure -> Sat/Contrast Boost -> Log Transform -> LUT -> JPEG encode
+ *    Exposure -> Sat/Contrast Boost -> Log Transform -> LUT -> Resize -> JPEG encode
  *
  *  @param session         Active preview session.
  *  @param logSpace        Log space name, or NULL to skip.
@@ -199,9 +202,12 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
  *  @param lutDomainMin    LUT domain min [R,G,B], or NULL for {0,0,0}.
  *  @param lutDomainMax    LUT domain max [R,G,B], or NULL for {1,1,1}.
  *  @param metering        Metering mode, or NULL for "matrix".
- *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
+ *  @param evOffset        Exposure offset in stops.
  *  @param jpegQuality     JPEG quality 1-100.
- *  @param outputPath      UTF-8 output path.
+ *  @param maxWidth        Max output width (0 = keep original resolution).
+ *  @param maxHeight       Max output height (0 = keep original resolution).
+ *  @param outBuffer       Receives JPEG data (caller must free via raFreePreviewBuffer).
+ *  @param outLen          Receives JPEG data length.
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raApplyPreviewGrading(
     RaPreviewSession session,
@@ -213,8 +219,14 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
     const char*      metering,
     float            evOffset,
     int              jpegQuality,
-    const char*      outputPath
+    int              maxWidth,
+    int              maxHeight,
+    unsigned char**  outBuffer,
+    int*             outLen
 );
+
+/** Free a buffer allocated by raApplyPreviewGrading. Safe to pass NULL. */
+RA_API void RA_CALL raFreePreviewBuffer(unsigned char* buffer);
 
 /** Toggle lens correction for an existing preview session.
  *
