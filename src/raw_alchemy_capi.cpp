@@ -727,11 +727,11 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
             lutPtr = &lut;
         }
 
+        // Resize to fit screen dimensions BEFORE grading for major performance gain
+        img = rawalchemy::resizeImage(img, maxWidth, maxHeight);
+
         RaResult res = runGradingOnly(img, logSpace, lutPtr, metering, evOffset);
         if (res != RA_OK) return res;
-
-        // Resize to fit screen dimensions
-        img = rawalchemy::resizeImage(img, maxWidth, maxHeight);
 
         // Encode to memory buffer
         std::vector<uint8_t> jpegBytes = rawalchemy::writeJpegToBuffer(img, jpegQuality, false, nullptr);
