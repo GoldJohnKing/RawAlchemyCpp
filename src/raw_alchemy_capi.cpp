@@ -64,10 +64,13 @@ struct RaImageBuffer_ {
 };
 
 struct RaPreviewSession_ {
-    rawalchemy::ImageBuffer decodedImage;   // raw decode (uncorrected), never modified
-    rawalchemy::ImageBuffer correctedImage; // lens-corrected, lazy-loaded (empty until computed)
+    rawalchemy::ImageBuffer decodedImage;   // full-res raw decode (uncorrected), never modified
+    rawalchemy::ImageBuffer correctedImage; // full-res lens-corrected, lazy-loaded
+    rawalchemy::ImageBuffer previewCache;   // downscaled preview base (no grading), width=0 until built
     std::string inputPath;
     bool useCorrected;                      // selects active buffer for grading
+    int cacheMaxWidth;                      // previewCache's maxWidth (0 = uninitialized)
+    int cacheMaxHeight;                     // previewCache's maxHeight
 };
 
 // ----------------------------------------------------------------
@@ -633,8 +636,11 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
         *outSession = new RaPreviewSession_{
             std::move(img),
             std::move(correctedImg),
+            {},                                    // previewCache (empty, built lazily)
             std::string(inputPath),
-            enableLensCorrection != 0
+            enableLensCorrection != 0,
+            0,                                     // cacheMaxWidth
+            0                                      // cacheMaxHeight
         };
         return RA_OK;
     } catch (...) {
@@ -705,7 +711,18 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
 
     try {
         auto& source = session->useCorrected ? session->correctedImage : session->decodedImage;
-        auto img = source;
+
+        // Build or reuse preview cache (scaled base image without grading)
+        if (session->previewCache.width == 0 ||
+            session->cacheMaxWidth != maxWidth ||
+            session->cacheMaxHeight != maxHeight) {
+            session->previewCache = rawalchemy::resizeImage(source, maxWidth, maxHeight);
+            session->cacheMaxWidth = maxWidth;
+            session->cacheMaxHeight = maxHeight;
+        }
+
+        // Clone from cached preview base — grading operates on already-downscaled image
+        auto img = session->previewCache;
 
         // Build LUT from pre-parsed data
         rawalchemy::LUT3D lut;
@@ -726,9 +743,6 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
             }
             lutPtr = &lut;
         }
-
-        // Resize to fit screen dimensions BEFORE grading for major performance gain
-        img = rawalchemy::resizeImage(img, maxWidth, maxHeight);
 
         RaResult res = runGradingOnly(img, logSpace, lutPtr, metering, evOffset);
         if (res != RA_OK) return res;
@@ -753,6 +767,64 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
 
 RA_API void RA_CALL raFreePreviewBuffer(unsigned char* buffer) {
     delete[] buffer;
+}
+
+RA_API RaResult RA_CALL raCommitPreview(
+    RaPreviewSession session,
+    const char*      logSpace,
+    const float*     lutTable,
+    int              lutSize,
+    const float*     lutDomainMin,
+    const float*     lutDomainMax,
+    const char*      metering,
+    float            evOffset,
+    int              jpegQuality,
+    const char*      outputPath)
+{
+    if (!session || !outputPath) {
+        setError("raCommitPreview: null parameter");
+        return RA_ERR_INVALID_PARAM;
+    }
+    clearError();
+
+    try {
+        auto& source = session->useCorrected ? session->correctedImage : session->decodedImage;
+
+        // Build LUT from pre-parsed data
+        rawalchemy::LUT3D lut;
+        const rawalchemy::LUT3D* lutPtr = nullptr;
+        if (lutTable && lutSize > 0) {
+            lut.size = lutSize;
+            int totalFloats = lutSize * lutSize * lutSize * 3;
+            lut.table.assign(lutTable, lutTable + totalFloats);
+            if (lutDomainMin) {
+                lut.domainMin[0] = lutDomainMin[0];
+                lut.domainMin[1] = lutDomainMin[1];
+                lut.domainMin[2] = lutDomainMin[2];
+            }
+            if (lutDomainMax) {
+                lut.domainMax[0] = lutDomainMax[0];
+                lut.domainMax[1] = lutDomainMax[1];
+                lut.domainMax[2] = lutDomainMax[2];
+            }
+            lutPtr = &lut;
+        }
+
+        // Operate on full-resolution source for final output
+        auto img = source;
+        RaResult res = runGradingOnly(img, logSpace, lutPtr, metering, evOffset);
+        if (res != RA_OK) return res;
+
+        bool ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false, nullptr);
+        if (!ok) {
+            setError("Failed to write output JPEG");
+            return RA_ERR_WRITE_FAILED;
+        }
+
+        return RA_OK;
+    } catch (...) {
+        return catchExceptions("raCommitPreview");
+    }
 }
 
 RA_API void RA_CALL raEndPreviewSession(RaPreviewSession session) {
