@@ -20,9 +20,26 @@
 #include "half_buffer.h"
 #endif
 
+#include <libraw/libraw.h>
+
 #include <cstring>
 #include <string>
 #include <stdexcept>
+
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+namespace {
+    std::wstring utf8_to_wide(const std::string& utf8) {
+        if (utf8.empty()) return std::wstring();
+        int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+        if (size <= 0) return std::wstring();
+        std::wstring wide(static_cast<size_t>(size - 1), 0);
+        MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], size);
+        return wide;
+    }
+}
+#endif
 
 // ----------------------------------------------------------------
 //  Thread-local error message storage
@@ -815,7 +832,30 @@ RA_API RaResult RA_CALL raCommitPreview(
         RaResult res = runGradingOnly(img, logSpace, lutPtr, metering, evOffset);
         if (res != RA_OK) return res;
 
-        bool ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false, nullptr);
+        // Collect EXIF from source RAW (lightweight — open_file only, no decode)
+        std::vector<uint8_t> exifBlob;
+        {
+            rawalchemy::ExifCollector* exifCollector = rawalchemy::createExifCollector();
+            LibRaw exifRaw;
+            exifRaw.set_exifparser_handler(
+                rawalchemy::getExifCallback(), exifCollector);
+
+            int openRet;
+#ifdef _WIN32
+            auto widePath = utf8_to_wide(session->inputPath);
+            openRet = exifRaw.open_file(widePath.c_str());
+#else
+            openRet = exifRaw.open_file(session->inputPath.c_str());
+#endif
+            if (openRet == LIBRAW_SUCCESS) {
+                exifBlob = rawalchemy::buildExifBlob(
+                    *exifCollector, img.width, img.height);
+            }
+            rawalchemy::destroyExifCollector(exifCollector);
+        }
+
+        bool ok = rawalchemy::writeJpeg(img, std::string(outputPath), jpegQuality, false,
+                    exifBlob.empty() ? nullptr : &exifBlob);
         if (!ok) {
             setError("Failed to write output JPEG");
             return RA_ERR_WRITE_FAILED;
