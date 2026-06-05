@@ -158,10 +158,20 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     float iso = rawProcessor.imgdata.other.iso_speed;
 
     if (params.denoiseThreshold < 0.0f) {
-        // Auto wavelet denoise: effective range ~100-800 for ISO 800-12800+
-        // dcraw recommends threshold 100-1000 for visible results.
-        if (iso > 500.0f) {
-            p.threshold = std::min((iso - 500.0f) * 800.0f / 6000.0f, 800.0f);
+        if (iso <= 100.0f) {
+            // Base ISO — sensor noise floor is negligible
+            p.threshold = 0;
+        } else if (iso < 400.0f) {
+            // Low ISO — minimal fixed denoise
+            p.threshold = 100;
+        } else {
+            // ISO 400–12800+: log2-scale mapping to 200–1000
+            // ISO is logarithmic (each doubling = same noise increase),
+            // so threshold should scale with log2(ISO).
+            float logLow = 8.644f;   // log2(400)
+            float logHigh = 13.644f;  // log2(12800)
+            float t = (log2f(iso) - logLow) / (logHigh - logLow);
+            p.threshold = 200.0f + std::min(std::max(t, 0.0f), 1.0f) * 800.0f;
         }
     } else {
         p.threshold = params.denoiseThreshold;
@@ -172,9 +182,8 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         p.fbdd_noiserd = 2;
     }
 
-    // Disable all denoising for low-ISO images (clean sensor data, no need)
-    if (iso <= 500.0f) {
-        p.threshold = 0;
+    // Disable FBDD for base ISO (sensor data is clean)
+    if (iso <= 100.0f) {
         p.fbdd_noiserd = 0;
     }
 
