@@ -61,12 +61,12 @@ struct DecodeParams {
     bool greenMatching = true;
 
     /// Median filter passes (post-demosaic, chroma only): 0=off
-    int medPasses = 3;
+    int medPasses = 2;
 
     /// Pre-demosaic noise reduction (FBDD): 0=off, 1=light, 2=full
     /// Operates on raw Bayer data before demosaic — more effective than post-demosaic
     /// denoising for chroma noise and false color artifacts.
-    int fbddNoiserd = 1;
+    int fbddNoiserd = -1;
 
     /// Wavelet denoise threshold: <0 = auto (ISO-adaptive), 0 = off, >0 = manual
     float denoiseThreshold = -1.0f;

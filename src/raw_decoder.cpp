@@ -161,7 +161,7 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         if (iso <= 100.0f) {
             // Base ISO — sensor noise floor is negligible
             p.threshold = 0;
-        } else if (iso < 400.0f) {
+        } else if (iso <= 400.0f) {
             // Low ISO — minimal fixed denoise
             p.threshold = 100;
         } else {
@@ -169,22 +169,27 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
             // ISO is logarithmic (each doubling = same noise increase),
             // so threshold should scale with log2(ISO).
             float logLow = 8.644f;   // log2(400)
-            float logHigh = 13.644f;  // log2(12800)
+            float logHigh = 13.644f; // log2(12800)
             float t = (log2f(iso) - logLow) / (logHigh - logLow);
-            p.threshold = 200.0f + std::min(std::max(t, 0.0f), 1.0f) * 800.0f;
+            p.threshold = 100.0f + std::min(std::max(t, 0.0f), 1.0f) * 900.0f;
         }
     } else {
         p.threshold = params.denoiseThreshold;
     }
 
-    // ISO-adaptive FBDD: upgrade to full mode for high-ISO images
-    if (params.fbddNoiserd > 0 && iso > 3200.0f) {
-        p.fbdd_noiserd = 2;
-    }
-
-    // Disable FBDD for base ISO (sensor data is clean)
-    if (iso <= 100.0f) {
-        p.fbdd_noiserd = 0;
+    if (params.fbddNoiserd < 0) {
+        if (iso <= 100.0f) {
+            // Disable FBDD for base ISO (sensor data is clean)
+            p.fbdd_noiserd = 0;
+        } else if (iso < 3200.0f) {
+            // Low ISO — minimal fixed denoise
+            p.fbdd_noiserd = 1;
+        } else {
+            // ISO-adaptive FBDD: upgrade to full mode for high-ISO images
+            p.fbdd_noiserd = 2;
+        }
+    } else {
+        p.fbdd_noiserd = params.fbddNoiserd;
     }
 
     // Register workaround for LibRaw iheight/iwidth bug (see fixPreInterpolateDimensions).
