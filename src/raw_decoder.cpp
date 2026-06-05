@@ -55,11 +55,30 @@ static void throwLibRawError(int ret, const char* context) {
     );
 }
 
+// ---- LibRaw upstream bug workaround ----
+// When wavelet denoising is enabled (threshold > 0), LibRaw sets shrink=1 and
+// halves iheight/iwidth. After wavelet_denoise(), pre_interpolate() upscales
+// the buffer to full size and sets shrink=0, but NEVER updates iheight/iwidth.
+// DHT (quality=11) and AAHD (quality=12) use iheight/iwidth for buffer indexing,
+// causing them to process only the top-left quarter of the image.
+// Inspired by RawTherapee's integration-layer workaround (rtengine/rawimage.cc).
+static void fixPreInterpolateDimensions(void* ctx) {
+    LibRaw* raw = static_cast<LibRaw*>(ctx);
+    raw->imgdata.sizes.iheight = raw->imgdata.sizes.height;
+    raw->imgdata.sizes.iwidth = raw->imgdata.sizes.width;
+}
+
+// LibRaw::callbacks is protected — expose via subclass.
+class LibRawAccessor : public LibRaw {
+public:
+    using LibRaw::callbacks;
+};
+
 // ---- decodeRaw ----
 ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
                        ExifCollector* exifCollector) {
     // Create LibRaw processor
-    LibRaw rawProcessor;
+    LibRawAccessor rawProcessor;
 
     // --- Configure decoding parameters ---
     auto& p = rawProcessor.imgdata.params;
@@ -98,6 +117,17 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         p.half_size = 1;
     }
 
+    // Green channel matching (G1/G3 equalization)
+    p.green_matching = params.greenMatching ? 1 : 0;
+
+    // Mix green: average G1/G3 into single channel, forces P1.colors=3.
+    // Without this, some sensors output 4-channel RGBG which breaks
+    // non-AHD demosaic algorithms (DHT, AAHD).
+    // rawProcessor.imgdata.rawdata.ioparams.mix_green = 1;
+
+    // Median filter passes (post-demosaic, chroma only)
+    p.med_passes = params.medPasses;
+
     // Set EXIF callback before open_file if collector provided
     if (exifCollector) {
         rawProcessor.set_exifparser_handler(
@@ -120,6 +150,21 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "unpack");
     }
+
+    // --- ISO-adaptive wavelet denoise threshold ---
+    if (params.denoiseThreshold < 0.0f) {
+        float iso = rawProcessor.imgdata.other.iso_speed;
+        if (iso > 400.0f) {
+            p.threshold = std::min((iso - 400.0f) * 500.0f / 12400.0f, 500.0f);
+        }
+    } else {
+        p.threshold = params.denoiseThreshold;
+    }
+
+    // Register workaround for LibRaw iheight/iwidth bug (see fixPreInterpolateDimensions).
+    // This callback runs after pre_interpolate() but before demosaic, ensuring
+    // iheight/iwidth match the actual buffer dimensions.
+    rawProcessor.callbacks.pre_interpolate_cb = fixPreInterpolateDimensions;
 
     // --- Process (demosaic + color conversion + gamma) ---
     ret = rawProcessor.dcraw_process();

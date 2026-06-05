@@ -50,11 +50,20 @@ struct DecodeParams {
 
     /// Demosaic quality:
     ///   3  = AHD (Adaptive Homogeneity-Directed, widely used)
-    ///   11 = AAHD (Adaptive AHD, slightly better, needs LibRaw >= 0.17)
-    int demosaicQuality = 3;
+    ///   11 = DHT (Directional, best detail & moiré suppression)
+    int demosaicQuality = 11;
 
     /// Half-size mode for fast preview (optional)
     bool halfSize = false;
+
+    /// Green channel matching: equalize G1/G3 difference (Fixed Pattern Noise)
+    bool greenMatching = true;
+
+    /// Median filter passes (post-demosaic, chroma only): 0=off
+    int medPasses = 2;
+
+    /// Wavelet denoise threshold: <0 = auto (ISO-adaptive), 0 = off, >0 = manual
+    float denoiseThreshold = -1.0f;
 };
 
 /**
