@@ -128,6 +128,9 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     // Median filter passes (post-demosaic, chroma only)
     p.med_passes = params.medPasses;
 
+    // Pre-demosaic noise reduction (FBDD)
+    p.fbdd_noiserd = params.fbddNoiserd;
+
     // Set EXIF callback before open_file if collector provided
     if (exifCollector) {
         rawProcessor.set_exifparser_handler(
@@ -151,14 +154,28 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         throwLibRawError(ret, "unpack");
     }
 
-    // --- ISO-adaptive wavelet denoise threshold ---
+    // --- ISO-adaptive noise reduction ---
+    float iso = rawProcessor.imgdata.other.iso_speed;
+
     if (params.denoiseThreshold < 0.0f) {
-        float iso = rawProcessor.imgdata.other.iso_speed;
-        if (iso > 400.0f) {
-            p.threshold = std::min((iso - 400.0f) * 500.0f / 12400.0f, 500.0f);
+        // Auto wavelet denoise: effective range ~100-800 for ISO 800-12800+
+        // dcraw recommends threshold 100-1000 for visible results.
+        if (iso > 500.0f) {
+            p.threshold = std::min((iso - 500.0f) * 800.0f / 6000.0f, 800.0f);
         }
     } else {
         p.threshold = params.denoiseThreshold;
+    }
+
+    // ISO-adaptive FBDD: upgrade to full mode for high-ISO images
+    if (params.fbddNoiserd > 0 && iso > 3200.0f) {
+        p.fbdd_noiserd = 2;
+    }
+
+    // Disable all denoising for low-ISO images (clean sensor data, no need)
+    if (iso <= 500.0f) {
+        p.threshold = 0;
+        p.fbdd_noiserd = 0;
     }
 
     // Register workaround for LibRaw iheight/iwidth bug (see fixPreInterpolateDimensions).
