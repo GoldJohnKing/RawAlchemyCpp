@@ -81,11 +81,9 @@ struct RaImageBuffer_ {
 };
 
 struct RaPreviewSession_ {
-    rawalchemy::ImageBuffer decodedImage;   // full-res raw decode (uncorrected), never modified
-    rawalchemy::ImageBuffer correctedImage; // full-res lens-corrected, lazy-loaded
-    rawalchemy::ImageBuffer previewCache;   // downscaled preview base (no grading), width=0 until built
+    rawalchemy::ImageBuffer baseImage;     // full-res: lens-corrected (if enabled) or raw decode
+    rawalchemy::ImageBuffer previewCache;  // downscaled preview base (no grading), width=0 until built
     std::string inputPath;
-    bool useCorrected;                      // selects active buffer for grading
     int cacheMaxWidth;                      // previewCache's maxWidth (0 = uninitialized)
     int cacheMaxHeight;                     // previewCache's maxHeight
 };
@@ -631,12 +629,10 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
 
     try {
         auto img = rawalchemy::decodeRaw(std::string(inputPath));
-        rawalchemy::ImageBuffer correctedImg;
 
         if (enableLensCorrection) {
             try {
                 auto meta = rawalchemy::extractMetadata(std::string(inputPath));
-                correctedImg = img;
                 rawalchemy::LensCorrectionParams lcParams;
                 lcParams.enabled = true;
                 lcParams.correctDistortion = true;
@@ -644,7 +640,7 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
                 lcParams.correctVignetting = true;
                 lcParams.distance = 1000.0f;
                 if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
-                rawalchemy::applyLensCorrection(correctedImg, meta, lcParams);
+                rawalchemy::applyLensCorrection(img, meta, lcParams);
             } catch (...) {
                 return catchExceptions("lens correction");
             }
@@ -652,10 +648,8 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
 
         *outSession = new RaPreviewSession_{
             std::move(img),
-            std::move(correctedImg),
             {},                                    // previewCache (empty, built lazily)
             std::string(inputPath),
-            enableLensCorrection != 0,
             0,                                     // cacheMaxWidth
             0                                      // cacheMaxHeight
         };
@@ -665,43 +659,6 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
     }
 }
 
-RA_API RaResult RA_CALL raToggleLensCorrection(
-    RaPreviewSession session,
-    int              enable,
-    const char*      customLensfunDb)
-{
-    if (!session) {
-        setError("raToggleLensCorrection: null session");
-        return RA_ERR_INVALID_PARAM;
-    }
-    clearError();
-
-    if (enable) {
-        session->useCorrected = true;
-        if (session->correctedImage.width == 0) {
-            try {
-                auto meta = rawalchemy::extractMetadata(session->inputPath);
-                session->correctedImage = session->decodedImage;
-                rawalchemy::LensCorrectionParams lcParams;
-                lcParams.enabled = true;
-                lcParams.correctDistortion = true;
-                lcParams.correctTca = true;
-                lcParams.correctVignetting = true;
-                lcParams.distance = 1000.0f;
-                if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
-                rawalchemy::applyLensCorrection(session->correctedImage, meta, lcParams);
-            } catch (...) {
-                session->correctedImage = rawalchemy::ImageBuffer{};
-                session->useCorrected = false;
-                return catchExceptions("lens correction");
-            }
-        }
-    } else {
-        session->useCorrected = false;
-    }
-
-    return RA_OK;
-}
 
 RA_API RaResult RA_CALL raApplyPreviewGrading(
     RaPreviewSession session,
@@ -727,7 +684,7 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
     *outLen = 0;
 
     try {
-        auto& source = session->useCorrected ? session->correctedImage : session->decodedImage;
+        auto& source = session->baseImage;
 
         // Build or reuse preview cache (scaled base image without grading)
         if (session->previewCache.width == 0 ||
@@ -805,7 +762,7 @@ RA_API RaResult RA_CALL raCommitPreview(
     clearError();
 
     try {
-        auto& source = session->useCorrected ? session->correctedImage : session->decodedImage;
+        auto& source = session->baseImage;
 
         // Build LUT from pre-parsed data
         rawalchemy::LUT3D lut;
