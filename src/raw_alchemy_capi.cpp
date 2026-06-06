@@ -7,21 +7,15 @@
 
 #include "raw_decoder.h"
 #include "metering.h"
-#include "stylize.h"
-#include "log_transform.h"
-#include "lut_applier.h"
 #include "tiff_writer.h"
 #include "jpeg_writer.h"
 #include "lens_correction.h"
 #include "exif_injector.h"
 #include "image_resize.h"
-
-#if defined(__aarch64__)
-#include "half_buffer.h"
-#endif
+#include "lut_applier.h"
+#include "grading_fused.h"
 
 #include <libraw/libraw.h>
-
 #include <cstring>
 #include <string>
 #include <stdexcept>
@@ -130,12 +124,7 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
                      float evOffset,
                      int enableLensCorrection,
                      const char* customLensfunDb) {
-    #if defined(__aarch64__)
-    rawalchemy::HalfImageBuffer imgF16;
-    bool usingF16 = false;
-    #endif
-
-    // Lens correction
+    // Lens correction (separate pass — spatial operation)
     if (enableLensCorrection) {
         try {
             rawalchemy::LensCorrectionParams lcParams;
@@ -145,80 +134,63 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
             lcParams.correctVignetting = true;
             lcParams.distance = 1000.0f;
             if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
-            // Ignore return — lens not found is not an error
             rawalchemy::applyLensCorrection(img, meta, lcParams);
         } catch (...) {
             return catchExceptions("lens correction");
         }
     }
 
-    // Exposure: auto-meter with offset
+    // Exposure metering (subsampled read)
+    float gain = 1.0f;
     try {
         std::string mode(metering ? metering : "matrix");
         if (!rawalchemy::isMeteringModeSupported(mode)) {
             setError(std::string("Unsupported metering mode: ") + mode);
             return RA_ERR_INVALID_PARAM;
         }
-        float gain = rawalchemy::computeAutoGain(img, mode);
-        img.applyGain(gain * std::pow(2.0f, evOffset));
+        gain = rawalchemy::computeAutoGain(img, mode);
+        gain *= std::pow(2.0f, evOffset);
     } catch (...) {
         return catchExceptions("exposure");
     }
 
-    // Saturation / Contrast boost
-    try {
-        rawalchemy::applySaturationContrast(img, 1.25f, 1.10f);
-    } catch (...) {
-        return catchExceptions("saturation/contrast");
-    }
-
-    // Log transform
-    if (logSpace) {
-        try {
-            std::string space(logSpace);
-            if (!rawalchemy::isLogSpaceSupported(space)) {
-                setError(std::string("Unsupported log space: ") + logSpace);
-                return RA_ERR_LOG_UNSUPPORTED;
-            }
-            // Gamut transform always in float32
-            rawalchemy::applyGamutTransform(img, space);
-
-            #if defined(__aarch64__)
-            imgF16 = rawalchemy::convertToF16(img);
-            rawalchemy::applyLogEncodingF16(imgF16, space);
-            usingF16 = true;
-            #else
-            rawalchemy::applyLogEncoding(img, space);
-            #endif
-        } catch (...) {
-            return catchExceptions("log transform");
-        }
-    }
-
-    // LUT
+    // Load LUT from file
+    rawalchemy::LUT3D lut;
     if (lutPath) {
         try {
-            auto lut = rawalchemy::loadCubeLUT(std::string(lutPath));
-            #if defined(__aarch64__)
-            if (usingF16) {
-                rawalchemy::applyLUT3DF16(imgF16, lut);
-            } else {
-                rawalchemy::applyLUT3D(img, lut);
-            }
-            #else
-            rawalchemy::applyLUT3D(img, lut);
-            #endif
+            lut = rawalchemy::loadCubeLUT(std::string(lutPath));
         } catch (...) {
-            return catchExceptions("LUT");
+            return catchExceptions("LUT load");
         }
     }
 
-    // Convert back from float16 before output
-    #if defined(__aarch64__)
-    if (usingF16) {
-        img = rawalchemy::convertToF32(imgF16);
+    // Build grading params
+    rawalchemy::GradingParams gp;
+    gp.gain = gain;
+    gp.enableBoost = true;
+    gp.saturation = 1.25f;
+    gp.contrast = 1.10f;
+    gp.pivot = 0.18f;
+
+    if (logSpace) {
+        auto it = rawalchemy::LOG_SPACES.find(std::string(logSpace));
+        if (it == rawalchemy::LOG_SPACES.end()) {
+            setError(std::string("Unsupported log space: ") + logSpace);
+            return RA_ERR_LOG_UNSUPPORTED;
+        }
+        gp.logSpaceInfo = &(it->second);
     }
-    #endif
+
+    if (lutPath) {
+        gp.lut = &lut;
+    }
+
+    // Fused single-pass grading
+    try {
+        rawalchemy::applyGradingFused(img, gp);
+    } catch (...) {
+        return catchExceptions("grading");
+    }
 
     return RA_OK;
 }
@@ -231,11 +203,6 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
                             float evOffset,
                             int enableLensCorrection,
                             const char* customLensfunDb) {
-    #if defined(__aarch64__)
-    rawalchemy::HalfImageBuffer imgF16;
-    bool usingF16 = false;
-    #endif
-
     // Lens correction
     if (enableLensCorrection) {
         try {
@@ -252,72 +219,47 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
         }
     }
 
-    // Exposure: auto-meter with offset
+    // Exposure metering
+    float gain = 1.0f;
     try {
         std::string mode(metering ? metering : "matrix");
         if (!rawalchemy::isMeteringModeSupported(mode)) {
             setError(std::string("Unsupported metering mode: ") + mode);
             return RA_ERR_INVALID_PARAM;
         }
-        float gain = rawalchemy::computeAutoGain(img, mode);
-        img.applyGain(gain * std::pow(2.0f, evOffset));
+        gain = rawalchemy::computeAutoGain(img, mode);
+        gain *= std::pow(2.0f, evOffset);
     } catch (...) {
         return catchExceptions("exposure");
     }
 
-    // Saturation / Contrast boost
-    try {
-        rawalchemy::applySaturationContrast(img, 1.25f, 1.10f);
-    } catch (...) {
-        return catchExceptions("saturation/contrast");
-    }
+    // Build grading params
+    rawalchemy::GradingParams gp;
+    gp.gain = gain;
+    gp.enableBoost = true;
+    gp.saturation = 1.25f;
+    gp.contrast = 1.10f;
+    gp.pivot = 0.18f;
 
-    // Log transform
     if (logSpace) {
-        try {
-            std::string space(logSpace);
-            if (!rawalchemy::isLogSpaceSupported(space)) {
-                setError(std::string("Unsupported log space: ") + logSpace);
-                return RA_ERR_LOG_UNSUPPORTED;
-            }
-            // Gamut transform always in float32
-            rawalchemy::applyGamutTransform(img, space);
-
-            #if defined(__aarch64__)
-            imgF16 = rawalchemy::convertToF16(img);
-            rawalchemy::applyLogEncodingF16(imgF16, space);
-            usingF16 = true;
-            #else
-            rawalchemy::applyLogEncoding(img, space);
-            #endif
-        } catch (...) {
-            return catchExceptions("log transform");
+        auto it = rawalchemy::LOG_SPACES.find(std::string(logSpace));
+        if (it == rawalchemy::LOG_SPACES.end()) {
+            setError(std::string("Unsupported log space: ") + logSpace);
+            return RA_ERR_LOG_UNSUPPORTED;
         }
+        gp.logSpaceInfo = &(it->second);
     }
 
-    // LUT — use pre-parsed data directly
     if (lut && !lut->empty()) {
-        try {
-            #if defined(__aarch64__)
-            if (usingF16) {
-                rawalchemy::applyLUT3DF16(imgF16, *lut);
-            } else {
-                rawalchemy::applyLUT3D(img, *lut);
-            }
-            #else
-            rawalchemy::applyLUT3D(img, *lut);
-            #endif
-        } catch (...) {
-            return catchExceptions("LUT");
-        }
+        gp.lut = lut;
     }
 
-    // Convert back from float16 before output
-    #if defined(__aarch64__)
-    if (usingF16) {
-        img = rawalchemy::convertToF32(imgF16);
+    // Fused single-pass grading
+    try {
+        rawalchemy::applyGradingFused(img, gp);
+    } catch (...) {
+        return catchExceptions("grading");
     }
-    #endif
 
     return RA_OK;
 }
@@ -331,76 +273,46 @@ RaResult runGradingOnly(
     const char* metering,
     float evOffset)
 {
-    #if defined(__aarch64__)
-    rawalchemy::HalfImageBuffer imgF16;
-    bool usingF16 = false;
-    #endif
-
-    // Exposure: auto-meter with offset
+    // Exposure metering (subsampled)
+    float gain = 1.0f;
     try {
         std::string mode(metering ? metering : "matrix");
         if (!rawalchemy::isMeteringModeSupported(mode)) {
             setError(std::string("Unsupported metering mode: ") + mode);
             return RA_ERR_INVALID_PARAM;
         }
-        float gain = rawalchemy::computeAutoGain(img, mode);
-        img.applyGain(gain * std::pow(2.0f, evOffset));
+        gain = rawalchemy::computeAutoGain(img, mode);
+        gain *= std::pow(2.0f, evOffset);
     } catch (...) {
         return catchExceptions("exposure");
     }
 
-    // Saturation / Contrast boost
-    try {
-        rawalchemy::applySaturationContrast(img, 1.25f, 1.10f);
-    } catch (...) {
-        return catchExceptions("saturation/contrast");
-    }
+    // Build grading params
+    rawalchemy::GradingParams gp;
+    gp.gain = gain;
+    gp.enableBoost = true;
+    gp.saturation = 1.25f;
+    gp.contrast = 1.10f;
+    gp.pivot = 0.18f;
 
-    // Log transform
     if (logSpace) {
-        try {
-            std::string space(logSpace);
-            if (!rawalchemy::isLogSpaceSupported(space)) {
-                setError(std::string("Unsupported log space: ") + logSpace);
-                return RA_ERR_LOG_UNSUPPORTED;
-            }
-            rawalchemy::applyGamutTransform(img, space);
-
-            #if defined(__aarch64__)
-            imgF16 = rawalchemy::convertToF16(img);
-            rawalchemy::applyLogEncodingF16(imgF16, space);
-            usingF16 = true;
-            #else
-            rawalchemy::applyLogEncoding(img, space);
-            #endif
-        } catch (...) {
-            return catchExceptions("log transform");
+        auto it = rawalchemy::LOG_SPACES.find(std::string(logSpace));
+        if (it == rawalchemy::LOG_SPACES.end()) {
+            setError(std::string("Unsupported log space: ") + logSpace);
+            return RA_ERR_LOG_UNSUPPORTED;
         }
+        gp.logSpaceInfo = &(it->second);
     }
 
-    // LUT
     if (lut && !lut->empty()) {
-        try {
-            #if defined(__aarch64__)
-            if (usingF16) {
-                rawalchemy::applyLUT3DF16(imgF16, *lut);
-            } else {
-                rawalchemy::applyLUT3D(img, *lut);
-            }
-            #else
-            rawalchemy::applyLUT3D(img, *lut);
-            #endif
-        } catch (...) {
-            return catchExceptions("LUT");
-        }
+        gp.lut = lut;
     }
 
-    // Convert back from float16 before output
-    #if defined(__aarch64__)
-    if (usingF16) {
-        img = rawalchemy::convertToF32(imgF16);
+    try {
+        rawalchemy::applyGradingFused(img, gp);
+    } catch (...) {
+        return catchExceptions("grading");
     }
-    #endif
 
     return RA_OK;
 }

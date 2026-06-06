@@ -187,6 +187,7 @@ ExternalProject_Add(libjpeg-turbo_external
         -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
         -DCMAKE_C_FLAGS=${CMAKE_C_FLAGS}
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    $<$<BOOL:${RA_LTO_ENABLED}>:-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON>
     $<$<BOOL:${CMAKE_TOOLCHAIN_FILE}>:-DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}>
     $<$<BOOL:${ANDROID_ABI}>:-DANDROID_ABI=${ANDROID_ABI}>
     $<$<BOOL:${ANDROID_PLATFORM}>:-DANDROID_PLATFORM=${ANDROID_PLATFORM}>
@@ -337,6 +338,7 @@ set(RA_LIBRARY_SOURCES
     src/image_resize.cpp
     src/log_transform.cpp
     src/lut_applier.cpp
+    src/grading_fused.cpp
     src/metering.cpp
     src/stylize.cpp
     src/lens_correction.cpp
@@ -446,20 +448,74 @@ if(BUILD_CLI)
     endif()
 endif()
 
-# ---- Compiler warnings & optimization ----
+# ---- Compiler warnings, optimization & performance tuning ----
+
+# --- 1. Link-Time Optimization (LTO) ---
+# Enables cross-module inlining and whole-program optimization.
+# Safe for all in-tree static libs (LibRaw, libtiff, libexif, lensfun, pugixml, glib_shim).
+# libjpeg-turbo uses ExternalProject; LTO is passed via CMAKE_ARGS below.
+set(RA_LTO_ENABLED OFF)
+# LTO incompatible with WINDOWS_EXPORT_ALL_SYMBOLS on MSVC (__create_def can't parse LTO objects)
+if(NOT MSVC)
+    include(CheckIPOSupported)
+    check_ipo_supported(RESULT RA_LTO_ENABLED OUTPUT RA_LTO_ERROR)
+    if(RA_LTO_ENABLED AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        include(CMakeDependentOption)
+        set_target_properties(raw_alchemy_core PROPERTIES
+            INTERPROCEDURAL_OPTIMIZATION ON
+        )
+    endif()
+endif()
+
+# --- 2. Floating-point model (layered per-module safety) ---
+#
+# Module safety analysis:
+#   raw_alchemy_core  — ✅ safe for full -ffast-math (no NaN/Inf/signed-zero deps)
+#   LibRaw            — ⚠️ only safe subset (has division-by-zero guards that break under -ffinite-math-only)
+#   lensfun           — ❌ no fast-math (NaN sentinels, Newton convergence, exact-zero guards)
+#   libtiff           — ❌ no fast-math (NaN self-comparison luma[0]!=luma[0])
+#   libjpeg-turbo     — ✅ safe (integer DCT only)
+#   libexif           — ✅ safe (no precision-sensitive FP)
+#   pugixml           — ✅ safe (has fpclassify fallback)
+#   glib_shim         — ✅ safe (no FP math)
+#
+if(MSVC)
+    # MSVC /fp:fast is conservative: does NOT assume finite math,
+    # so it preserves division-by-zero guards. Safe for LibRaw too.
+    target_compile_options(raw_alchemy_core PRIVATE /fp:fast /arch:AVX2 /Ob3)
+    target_compile_options(raw_r PUBLIC /fp:fast)
+    # lensfun & libtiff: no /fp:fast (keep default /fp:precise)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    # --- raw_alchemy_core: full -ffast-math ---
+    target_compile_options(raw_alchemy_core PRIVATE -ffast-math)
+
+    # --- LibRaw: safe subset only ---
+    # Excludes -ffinite-math-only (would break division-by-zero guards in
+    # cubic_spline, dcb_demosaic, ahd_demosaic) and -fassociative-math
+    # (would change wavelet denoise accumulation order).
+    target_compile_options(raw_r PUBLIC
+        -fno-math-errno
+        -fno-signed-zeros
+        -fno-trapping-math
+    )
+
+    # lensfun & libtiff: no fast-math flags (keep strict FP)
+endif()
+
+# --- 3. Optimization level & platform-specific tuning ---
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     if(ANDROID OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|armv7-a|arm64")
-        # -O3 enables auto-vectorization (NEON on ARM); safe for floating-point image processing
+        # -O3 enables auto-vectorization (NEON on ARM)
         target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O3)
     else()
-        target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O2)
+        # Linux/macOS x64: -O3 for consistent optimization across platforms
+        target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O3)
     endif()
 endif()
 
 # ARM64 float16 support detection (for half-precision bandwidth optimization)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_definitions(raw_alchemy_core PUBLIC RA_HAS_FLOAT16)
-    message(STATUS "  float16:    enabled (ARM64 NEON FP16)")
 endif()
 
 # ---- Status ----
@@ -478,8 +534,19 @@ message(STATUS "  Lensfun:    ${RA_LENSFUN_ENABLED}")
         message(STATUS "             ${RA_LENSFUN_SOURCE}")
     endif()
 message(STATUS "  OpenMP:     ${OpenMP_CXX_FOUND}")
+message(STATUS "  LTO:        ${RA_LTO_ENABLED}")
+if(MSVC)
+    message(STATUS "  Note:       LTO disabled on MSVC (incompatible with WINDOWS_EXPORT_ALL_SYMBOLS)")
+    message(STATUS "  FP model:   /fp:fast (core + LibRaw), /fp:precise (lensfun, libtiff)")
+    message(STATUS "  SIMD:       /arch:AVX2 /Ob3")
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    message(STATUS "  FP model:   -ffast-math (core), safe subset (LibRaw), strict (lensfun, libtiff)")
+endif()
 if(ANDROID)
     message(STATUS "  Android:    ${ANDROID_ABI} (API ${ANDROID_PLATFORM_LEVEL})")
+    message(STATUS "  float16:    enabled (ARM64 NEON FP16)")
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    message(STATUS "  float16:    enabled (ARM64 NEON FP16)")
 endif()
 message(STATUS "=================================")
 message(STATUS "")
