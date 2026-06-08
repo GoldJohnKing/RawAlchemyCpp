@@ -171,15 +171,22 @@ typedef struct RaPreviewSession_* RaPreviewSession;
 /** Decode a RAW file and apply lens correction, caching the result for
  *  fast re-grading.  Call raEndPreviewSession when done.
  *
- *  @param inputPath           UTF-8 path to input RAW file.
+ *  @param inputPath             UTF-8 path to input RAW file.
  *  @param enableLensCorrection  If non-zero, apply lens correction.
- *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
- *  @param outSession          Receives the session handle.
+ *  @param customLensfunDb       Custom Lensfun DB path, or NULL.
+ *  @param halfSize              If non-zero, use LibRaw half-size demosaic
+ *                               (faster, lower resolution).
+ *  @param maxPreviewWidth       Max width after lens correction (0 = no resize).
+ *  @param maxPreviewHeight      Max height after lens correction (0 = no resize).
+ *  @param outSession            Receives the session handle.
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raBeginPreviewSession(
     const char* inputPath,
     int         enableLensCorrection,
     const char* customLensfunDb,
+    int         halfSize,
+    int         maxPreviewWidth,
+    int         maxPreviewHeight,
     RaPreviewSession* outSession
 );
 

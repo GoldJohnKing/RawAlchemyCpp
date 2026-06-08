@@ -531,6 +531,9 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
     const char* inputPath,
     int         enableLensCorrection,
     const char* customLensfunDb,
+    int         halfSize,
+    int         maxPreviewWidth,
+    int         maxPreviewHeight,
     RaPreviewSession* outSession)
 {
     if (!inputPath || !outSession) {
@@ -540,7 +543,12 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
     clearError();
 
     try {
-        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        rawalchemy::DecodeParams params;
+        if (halfSize) {
+            params.halfSize = true;
+        }
+
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
 
         if (enableLensCorrection) {
             try {
@@ -556,6 +564,11 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
             } catch (...) {
                 return catchExceptions("lens correction");
             }
+        }
+
+        // Downscale to target preview dimensions after lens correction
+        if (maxPreviewWidth > 0 || maxPreviewHeight > 0) {
+            img = rawalchemy::resizeImage(img, maxPreviewWidth, maxPreviewHeight);
         }
 
         *outSession = new RaPreviewSession_{
