@@ -546,6 +546,10 @@ RA_API RaResult RA_CALL raBeginPreviewSession(
         rawalchemy::DecodeParams params;
         if (halfSize) {
             params.halfSize = true;
+            // Preview mode: disable expensive noise reduction
+            params.medPasses = 0;
+            params.fbddNoiserd = 0;
+            params.denoiseThreshold = 0.0f;
         }
 
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
