@@ -235,39 +235,6 @@ RA_API RaResult RA_CALL raApplyPreviewGrading(
 /** Free a buffer allocated by raApplyPreviewGrading. Safe to pass NULL. */
 RA_API void RA_CALL raFreePreviewBuffer(unsigned char* buffer);
 
-/** Generate final full-resolution JPEG from the session's cached image and write to disk.
- *
- *  Unlike raApplyPreviewGrading (which operates on downscaled preview cache),
- *  this works directly on the full-resolution decoded/corrected image.
- *  Useful for generating a final save without re-decoding the RAW file.
- *
- *  The session is NOT destroyed by this call — caller must still call raEndPreviewSession.
- *
- *  @param session         Active preview session.
- *  @param logSpace        Log space name, or NULL to skip.
- *  @param lutTable        Pre-parsed LUT float data [size^3 x 3], or NULL.
- *  @param lutSize         LUT dimension. Ignored if lutTable is NULL.
- *  @param lutDomainMin    LUT domain min [R,G,B], or NULL for {0,0,0}.
- *  @param lutDomainMax    LUT domain max [R,G,B], or NULL for {1,1,1}.
- *  @param metering        Metering mode, or NULL for "matrix".
- *  @param evOffset        Exposure offset in stops.
- *  @param jpegQuality     JPEG quality 1-100.
- *  @param outputPath      Output file path.
- *  @return RA_OK on success. */
-RA_API RaResult RA_CALL raCommitPreview(
-    RaPreviewSession session,
-    const char*      logSpace,
-    const float*     lutTable,
-    int              lutSize,
-    const float*     lutDomainMin,
-    const float*     lutDomainMax,
-    const char*      metering,
-    float            evOffset,
-    int              jpegQuality,
-    const char*      outputPath
-);
-
-
 /** End a preview session and release all cached resources.
  *  Safe to pass NULL (no-op). */
 RA_API void RA_CALL raEndPreviewSession(RaPreviewSession session);
