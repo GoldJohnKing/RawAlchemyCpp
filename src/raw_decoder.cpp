@@ -182,6 +182,105 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     return result;
 }
 
+// ---- decodeRawMosaic (Phase 1) ----
+//
+// Distinct from decodeRaw(): NO dcraw_process — we read the un-demosaiced
+// 1-channel CFA buffer (rawdata.raw_image) and copy the visible region into
+// a RawMosaic. All color/demosaic postprocessing is deferred to later phases.
+RawMosaic decodeRawMosaic(const std::string& rawPath, ExifCollector* exifCollector) {
+    LibRaw rawProcessor;
+
+    // Set EXIF callback before open_file if collector provided (same pattern
+    // as decodeRaw()).
+    if (exifCollector) {
+        rawProcessor.set_exifparser_handler(
+            rawalchemy::getExifCallback(), exifCollector);
+    }
+
+    // --- Open + unpack only (do NOT call dcraw_process) ---
+    int ret = rawProcessor.open_file(rawPath.c_str());
+    if (ret != LIBRAW_SUCCESS) {
+        throwLibRawError(ret, "open_file (mosaic)");
+    }
+
+    ret = rawProcessor.unpack();
+    if (ret != LIBRAW_SUCCESS) {
+        throwLibRawError(ret, "unpack (mosaic)");
+    }
+
+    // --- Reject non-CFA sensors (Foveon / 3-channel color3_image) ---
+    // These have no packed raw_image and must use the dcraw_process fallback.
+    if (rawProcessor.imgdata.rawdata.raw_image == nullptr) {
+        throw std::runtime_error(
+            "[RawMosaic] non-CFA sensor; use dcraw_process path");
+    }
+
+    const auto& sizes  = rawProcessor.imgdata.sizes;
+    const auto& idata  = rawProcessor.imgdata.idata;
+    const auto& color  = rawProcessor.imgdata.color;
+    const auto& rawdata = rawProcessor.imgdata.rawdata;
+
+    const int visW = static_cast<int>(sizes.width);
+    const int visH = static_cast<int>(sizes.height);
+    const int top  = static_cast<int>(sizes.top_margin);
+    const int left = static_cast<int>(sizes.left_margin);
+    const int rawW = static_cast<int>(sizes.raw_width);  // source stride
+
+    if (visW <= 0 || visH <= 0 || rawW <= 0) {
+        throw std::runtime_error(
+            "[RawMosaic] invalid sizes (width/height/raw_width <= 0)");
+    }
+
+    RawMosaic m;
+    m.width   = visW;
+    m.height  = visH;
+    m.filters = idata.filters;
+    m.colors  = idata.colors;
+    m.is_foveon = (idata.is_foveon != 0);
+    std::memcpy(m.xtrans, idata.xtrans, sizeof(m.xtrans));
+
+    // --- Copy visible region as float ---
+    // Source stride is raw_width; rows/cols are offset by top/left margins.
+    m.data.resize(static_cast<size_t>(visW) * visH);
+    const ushort* src = rawdata.raw_image;
+    const size_t dstStride = static_cast<size_t>(visW);
+    const size_t srcStride = static_cast<size_t>(rawW);
+    const size_t srcOffset = static_cast<size_t>(top) * srcStride + left;
+    for (int y = 0; y < visH; ++y) {
+        const ushort* srcRow = src + srcOffset + static_cast<size_t>(y) * srcStride;
+        float* dstRow = m.data.data() + static_cast<size_t>(y) * dstStride;
+        for (int x = 0; x < visW; ++x) {
+            dstRow[x] = static_cast<float>(srcRow[x]);
+        }
+    }
+
+    // --- Metadata ---
+    m.maximum = static_cast<float>(color.maximum);
+    for (int c = 0; c < 4; ++c) {
+        m.cam_mul[c] = color.cam_mul[c];
+    }
+    for (int c = 0; c < 4; ++c) {
+        for (int k = 0; k < 3; ++k) {
+            m.cam_xyz[c][k] = static_cast<double>(color.cam_xyz[c][k]);
+        }
+    }
+    m.flip = sizes.flip;
+
+    // --- cblack collapse ---
+    // Effective per-channel black = scalar `black` + per-channel offset
+    // `cblack[c]`. This matches rawpy's black_level_per_channel.
+    // NOTE: the 2D darkframe component (cblack[6..], dimensions cblack[4..5])
+    // is NOT applied here — Phase 1 limitation. Rare medium-format / Sony
+    // sensors with a true per-pixel darkframe must fall back to dcraw_process.
+    m.has_2d_darkframe = (color.cblack[4] != 0 || color.cblack[5] != 0);
+    for (int c = 0; c < 4; ++c) {
+        m.cblack[c] = static_cast<float>(color.black) +
+                      static_cast<float>(color.cblack[c]);
+    }
+
+    return m;
+}
+
 // ---- extractMetadata ----
 CameraMetadata extractMetadata(const std::string& rawPath) {
     CameraMetadata meta;

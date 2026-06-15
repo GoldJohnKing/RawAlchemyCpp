@@ -326,6 +326,12 @@ endif()
 # ---- Library target ----
 set(RA_LIBRARY_SOURCES
     src/raw_decoder.cpp
+    src/raw_preprocess.cpp
+    src/highlight.cpp
+    src/demosaic_rcd.cpp
+    src/demosaic_xtrans.cpp
+    src/colorspace_matrices.cpp
+    src/raw_postprocess.cpp
     src/tiff_writer.cpp
     src/jpeg_writer.cpp
     src/log_transform.cpp
@@ -426,9 +432,29 @@ if(BUILD_CLI)
     add_executable(raw_alchemy_verify src/verify.cpp)
     target_link_libraries(raw_alchemy_verify PRIVATE raw_alchemy_core)
 
+    # ---- Phase 2 highlight reconstruction cross-validation harness ----
+    add_executable(raw_alchemy_highlight_test src/highlight_test.cpp)
+    target_link_libraries(raw_alchemy_highlight_test PRIVATE raw_alchemy_core)
+
+    # ---- Phase 3 RCD demosaic cross-validation harness ----
+    add_executable(raw_alchemy_rcd_test src/rcd_test.cpp)
+    target_link_libraries(raw_alchemy_rcd_test PRIVATE raw_alchemy_core)
+
+    # ---- Phase 4 X-Trans (Markesteijn) demosaic cross-validation harness ----
+    add_executable(raw_alchemy_xtrans_test src/xtrans_test.cpp)
+    target_link_libraries(raw_alchemy_xtrans_test PRIVATE raw_alchemy_core)
+
+    # ---- Phase 6 lens-correction edge-robustness synthetic harness ----
+    add_executable(raw_alchemy_lens_test src/lens_test.cpp)
+    target_link_libraries(raw_alchemy_lens_test PRIVATE raw_alchemy_core)
+
     # Windows: place executables next to the DLL so they can find it at runtime
     if(WIN32 AND BUILD_SHARED)
-        set_target_properties(raw_alchemy_cli raw_alchemy_verify PROPERTIES
+        set_target_properties(raw_alchemy_cli raw_alchemy_verify
+                              raw_alchemy_highlight_test
+                              raw_alchemy_rcd_test
+                              raw_alchemy_xtrans_test
+                              raw_alchemy_lens_test PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
         )
     endif()
@@ -436,6 +462,10 @@ if(BUILD_CLI)
     # Compiler warnings for CLI targets
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(raw_alchemy_cli PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(raw_alchemy_highlight_test PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(raw_alchemy_rcd_test PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(raw_alchemy_xtrans_test PRIVATE -Wall -Wextra -Wpedantic)
+        target_compile_options(raw_alchemy_lens_test PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endif()
 

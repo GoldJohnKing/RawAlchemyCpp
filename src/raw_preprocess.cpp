@@ -1,0 +1,176 @@
+/**
+ * @file raw_preprocess.cpp
+ * @brief Phase 1 RAW preprocessing — black-level subtraction + hot-pixel fix.
+ *
+ * Direct ports of Python reference `raw_alchemy.core`:
+ *   - subtract_black_level()  (core.py:20-31)
+ *   - fix_hot_pixels()        (core.py:34-46)
+ *
+ * The hot-pixel median is hand-rolled (no OpenCV dependency). The plane loop
+ * is OpenMP-parallelized to match the existing project style (src/stylize.cpp).
+ */
+
+#include "raw_preprocess.h"
+
+#include <algorithm>
+#include <cmath>
+
+#ifdef RA_USE_OPENMP
+#include <omp.h>
+#endif
+
+namespace rawalchemy {
+
+// ---- subtractBlackLevel ----
+// Port of Python `subtract_black_level` (core.py:20-31):
+//   pat_size = cfa_pattern.shape[0]
+//   for r in range(pat_size):
+//     for c in range(pat_size):
+//       color = cfa_pattern[r, c]
+//       bl_c  = float(bl[min(color, len(bl) - 1)])
+//       result[r::pat_size, c::pat_size] =
+//           np.maximum(sensor_raw[r::pat_size, c::pat_size] - bl_c, 0) /
+//           (wl - bl_c)
+void subtractBlackLevel(RawMosaic& m) {
+    const int patSize = (m.filters == 9) ? 6 : 2;
+    const int W = m.width;
+    const int H = m.height;
+    const float wl = m.maximum;
+
+    // cblack holds 4 collapsed per-channel values. Clamp the color index to
+    // 3 (== len(bl) - 1 in the Python oracle where bl has 4 entries).
+    for (int r = 0; r < patSize; ++r) {
+        for (int c = 0; c < patSize; ++c) {
+            const int color = cfaColor(m, r, c);
+            const int idx = std::min(color, 3);
+            const float bl_c = m.cblack[idx];
+            const float denom = wl - bl_c;
+
+            // Guard against degenerate white==black.
+            if (denom <= 0.0f) {
+                continue;  // leave values untouched; nothing to normalize.
+            }
+
+            // result[r::patSize, c::patSize] = max(val - bl_c, 0) / denom
+            for (int y = r; y < H; y += patSize) {
+                float* row = m.data.data() + static_cast<size_t>(y) * W;
+                for (int x = c; x < W; x += patSize) {
+                    const float v = row[x] - bl_c;
+                    row[x] = (v > 0.0f ? v : 0.0f) / denom;
+                }
+            }
+        }
+    }
+}
+
+// ---- Hand-rolled 3x3 median (BORDER_REPLICATE) ----
+// Returns the median of up to 9 floats; uses std::nth_element.
+static inline float median3x3(const float* plane, int W, int H, int y, int x,
+                                float* scratch) {
+    int n = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        int yy = y + dy;
+        if (yy < 0) yy = 0; else if (yy >= H) yy = H - 1;
+        for (int dx = -1; dx <= 1; ++dx) {
+            int xx = x + dx;
+            if (xx < 0) xx = 0; else if (xx >= W) xx = W - 1;
+            scratch[n++] = plane[static_cast<size_t>(yy) * W + xx];
+        }
+    }
+    // Median of n values: position n/2 after partial sort.
+    std::nth_element(scratch, scratch + n / 2, scratch + n);
+    return scratch[n / 2];
+}
+
+// ---- fixHotPixels ----
+// Port of Python `fix_hot_pixels` (core.py:34-46):
+//   pat_size = cfa_pattern.shape[0]
+//   for r in range(pat_size):
+//     for c in range(pat_size):
+//       plane  = raw_norm[r::pat_size, c::pat_size]
+//       med    = cv2.medianBlur(plane, 3)         # 3x3 median (oracle: scipy)
+//       diff   = np.abs(plane - med)
+//       std    = max(np.std(diff), 1e-6)
+//       hot    = diff > threshold * std
+//       plane[hot] = med[hot]
+void fixHotPixels(RawMosaic& m, float threshold) {
+    const int patSize = (m.filters == 9) ? 6 : 2;
+    const int W = m.width;
+    const int H = m.height;
+
+    // For each plane (br, bc) in the patSize x patSize CFA offset grid:
+    //   planeDims: planeH = ceil((H - br) / patSize), planeW = ceil((W - bc) / patSize)
+    // Operate on the mosaic in-place by indexing through the strided subsample.
+
+    #ifdef RA_USE_OPENMP
+    #pragma omp parallel for collapse(2) schedule(static)
+    #endif
+    for (int br = 0; br < patSize; ++br) {
+        for (int bc = 0; bc < patSize; ++bc) {
+            // Plane dimensions (subsampled grid).
+            const int planeH = (H - br + patSize - 1) / patSize;
+            const int planeW = (W - bc + patSize - 1) / patSize;
+            if (planeH <= 0 || planeW <= 0) continue;
+
+            // Pull the plane into a contiguous buffer for cache-friendly
+            // median filtering, then write back. This matches the Python
+            // semantic of `plane = raw_norm[r::pat_size, c::pat_size]`.
+            std::vector<float> plane(static_cast<size_t>(planeH) * planeW);
+            std::vector<float> med(static_cast<size_t>(planeH) * planeW);
+
+            for (int py = 0; py < planeH; ++py) {
+                const int y = br + py * patSize;
+                const float* srcRow = m.data.data() + static_cast<size_t>(y) * W;
+                float* dstRow = plane.data() + static_cast<size_t>(py) * planeW;
+                for (int px = 0; px < planeW; ++px) {
+                    const int x = bc + px * patSize;
+                    dstRow[px] = srcRow[x];
+                }
+            }
+
+            // 3x3 median per pixel, BORDER_REPLICATE.
+            float scratch[9];
+            for (int py = 0; py < planeH; ++py) {
+                float* mRow = med.data() + static_cast<size_t>(py) * planeW;
+                for (int px = 0; px < planeW; ++px) {
+                    mRow[px] = median3x3(plane.data(), planeW, planeH, py, px, scratch);
+                }
+            }
+
+            // diff = abs(plane - med); std = max(stddev(diff), 1e-6).
+            // Python uses np.std(diff) which is population std (ddof=0).
+            double sum = 0.0, sumSq = 0.0;
+            const size_t planeN = static_cast<size_t>(planeH) * planeW;
+            // Reuse plane[] to store |diff| (avoids another alloc).
+            for (size_t i = 0; i < planeN; ++i) {
+                const float d = std::fabs(plane[i] - med[i]);
+                plane[i] = d;
+                sum += d;
+                sumSq += static_cast<double>(d) * d;
+            }
+            const double mean = sum / static_cast<double>(planeN);
+            double variance = sumSq / static_cast<double>(planeN) - mean * mean;
+            if (variance < 0.0) variance = 0.0;  // guard against FP rounding
+            float std_v = static_cast<float>(std::sqrt(variance));
+            if (std_v < 1e-6f) std_v = 1e-6f;
+            const float cutoff = threshold * std_v;
+
+            // hot = diff > cutoff; replace hot pixels in the mosaic with median.
+            // Non-hot pixels keep their existing mosaic value (untouched in
+            // m.data). plane[] currently holds |diff|; med[] holds the median.
+            for (int py = 0; py < planeH; ++py) {
+                const int y = br + py * patSize;
+                float* dstRow = m.data.data() + static_cast<size_t>(y) * W;
+                const float* medRow  = med.data()  + static_cast<size_t>(py) * planeW;
+                const float* diffRow = plane.data() + static_cast<size_t>(py) * planeW;
+                for (int px = 0; px < planeW; ++px) {
+                    if (diffRow[px] > cutoff) {
+                        dstRow[bc + px * patSize] = medRow[px];
+                    }
+                }
+            }
+        }
+    }
+}
+
+} // namespace rawalchemy

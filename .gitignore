@@ -23,3 +23,6 @@ __pycache__/
 # superpowers docs
 docs/superpowers
 output_exif.jpg
+
+# deepwork session state
+.slim/deepwork/

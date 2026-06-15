@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <string>
@@ -36,6 +37,119 @@
 #include <sys/stat.h>
 
 namespace rawalchemy {
+
+// ============================================================================
+// postProcessLensCoords — pure coord math, always available.
+// Port of lensfun_wrapper.py:851-903 (two-stage safety scale + uniform mask).
+// ============================================================================
+
+std::vector<uint8_t> postProcessLensCoords(float* coords, int W, int H,
+                                           float interp_margin) {
+    // Coord buffer layout per pixel: [R_x, R_y, G_x, G_y, B_x, B_y] ==
+    // [pixel][channel][xy]. This matches the reference numpy (H,W,3,2) reshape
+    // exactly (row-major flat index ((row*W+col)*3 + c)*2 + k).
+    const size_t numPixels = static_cast<size_t>(W) * H;
+
+    // ---- Helper: recompute global bounds over all 3 channels ----
+    auto recomputeBounds = [&](float& x_min, float& x_max,
+                               float& y_min, float& y_max) {
+        x_min = std::numeric_limits<float>::max();
+        x_max = std::numeric_limits<float>::lowest();
+        y_min = std::numeric_limits<float>::max();
+        y_max = std::numeric_limits<float>::lowest();
+        for (size_t p = 0; p < numPixels; ++p) {
+            for (int c = 0; c < 3; ++c) {
+                const float xv = coords[p * 6 + c * 2];
+                const float yv = coords[p * 6 + c * 2 + 1];
+                if (xv < x_min) x_min = xv;
+                if (xv > x_max) x_max = xv;
+                if (yv < y_min) y_min = yv;
+                if (yv > y_max) y_max = yv;
+            }
+        }
+    };
+
+    float x_min, x_max, y_min, y_max;
+    recomputeBounds(x_min, x_max, y_min, y_max);
+
+    // ---- Stage-A: auto-crop scale (mirror lines 858-868) ----
+    if (x_min < 0 || y_min < 0 || x_max >= W || y_max >= H) {
+        const float x_range = x_max - x_min;
+        const float y_range = y_max - y_min;
+        const float scale_x = (x_range > 0) ? (W - 1) / x_range : 1.0f;
+        const float scale_y = (y_range > 0) ? (H - 1) / y_range : 1.0f;
+        const float scale = std::min(scale_x, scale_y);
+        const float cx = static_cast<float>(W) / 2.0f;
+        const float cy = static_cast<float>(H) / 2.0f;
+        for (size_t p = 0; p < numPixels; ++p) {
+            for (int c = 0; c < 3; ++c) {
+                coords[p * 6 + c * 2]     = cx + (coords[p * 6 + c * 2]     - cx) * scale;
+                coords[p * 6 + c * 2 + 1] = cy + (coords[p * 6 + c * 2 + 1] - cy) * scale;
+            }
+        }
+        printf("  [Lensfun] Auto-crop scale: %.4f (src range: x=[%.1f,%.1f] y=[%.1f,%.1f])\n",
+               scale, x_min, x_max, y_min, y_max);
+    }
+
+    // ---- Stage-B: safety crop (mirror lines 871-890) ----
+    recomputeBounds(x_min, x_max, y_min, y_max);
+    const float x_hi = (W - 1) - interp_margin;
+    const float y_hi = (H - 1) - interp_margin;
+    if (x_min < interp_margin || y_min < interp_margin ||
+        x_max > x_hi || y_max > y_hi) {
+        const float cx = (static_cast<float>(W) - 1.0f) / 2.0f;
+        const float cy = (static_cast<float>(H) - 1.0f) / 2.0f;
+        // scales list (reference starts with [1.0] and appends).
+        float scales[5];
+        int nscales = 0;
+        scales[nscales++] = 1.0f;
+        if (x_min < cx) scales[nscales++] = (cx - interp_margin) / std::max(cx - x_min, 1e-6f);
+        if (x_max > cx) scales[nscales++] = (x_hi - cx) / std::max(x_max - cx, 1e-6f);
+        if (y_min < cy) scales[nscales++] = (cy - interp_margin) / std::max(cy - y_min, 1e-6f);
+        if (y_max > cy) scales[nscales++] = (y_hi - cy) / std::max(y_max - cy, 1e-6f);
+        float scale = scales[0];
+        for (int i = 1; i < nscales; ++i) scale = std::min(scale, scales[i]);
+        if (scale < 0.0f) scale = 0.0f;
+        for (size_t p = 0; p < numPixels; ++p) {
+            for (int c = 0; c < 3; ++c) {
+                coords[p * 6 + c * 2]     = cx + (coords[p * 6 + c * 2]     - cx) * scale;
+                coords[p * 6 + c * 2 + 1] = cy + (coords[p * 6 + c * 2 + 1] - cy) * scale;
+            }
+        }
+        printf("  [Lensfun] Safety crop scale: %.4f\n", scale);
+    }
+
+    // ---- Uniform OOB mask (mirror lines 892-895) ----
+    // mask[pixel] = 1 if ANY of the 3 channels is within interp_margin of any
+    // border. This is computed BEFORE the clamp, on the post-stage-B coords.
+    std::vector<uint8_t> mask(numPixels, 0);
+    for (size_t p = 0; p < numPixels; ++p) {
+        bool oob = false;
+        for (int c = 0; c < 3 && !oob; ++c) {
+            const float xv = coords[p * 6 + c * 2];
+            const float yv = coords[p * 6 + c * 2 + 1];
+            if (xv < interp_margin || xv > (W - 1) - interp_margin ||
+                yv < interp_margin || yv > (H - 1) - interp_margin) {
+                oob = true;
+            }
+        }
+        mask[p] = oob ? 1 : 0;
+    }
+
+    // ---- Clamp (mirror lines 898-899) ----
+    const float x_lo = 0.0f, x_hiClamp = static_cast<float>(W - 1);
+    const float y_lo = 0.0f, y_hiClamp = static_cast<float>(H - 1);
+    for (size_t p = 0; p < numPixels; ++p) {
+        for (int c = 0; c < 3; ++c) {
+            float& xv = coords[p * 6 + c * 2];
+            float& yv = coords[p * 6 + c * 2 + 1];
+            if (xv < x_lo) xv = x_lo; else if (xv > x_hiClamp) xv = x_hiClamp;
+            if (yv < y_lo) yv = y_lo; else if (yv > y_hiClamp) yv = y_hiClamp;
+        }
+    }
+
+    return mask;
+}
 
 // ============================================================================
 // When Lensfun is not available, provide a stub
@@ -304,13 +418,21 @@ bool applyLensCorrection(ImageBuffer& img,
             printf("  [Lensfun] Distortion/TCA correction: remapping %dx%d pixels...\n",
                    img.width, img.height);
 
+            const int w = img.width;
+            const int h = img.height;
+            const int ch = img.channels;
+
+            // --- Phase 6: two-stage safety scale + uniform OOB mask ---
+            // Port of lensfun_wrapper.py:851-903. The uniform mask is the
+            // critical anti-fringing change: where ANY channel is OOB, all 3
+            // channels are zeroed together (the prior per-channel constant-0
+            // caused color fringing because each channel hit 0 independently).
+            auto oobMask = postProcessLensCoords(coords.data(), w, h);
+
             // Create output buffer
             ImageBuffer output(img.width, img.height);
 
             // Remap with bicubic interpolation, per-channel
-            const int w = img.width;
-            const int h = img.height;
-            const int ch = img.channels;
 
 #ifdef RA_USE_OPENMP
             #pragma omp parallel for schedule(dynamic, 16)
@@ -326,6 +448,12 @@ bool applyLensCorrection(ImageBuffer& img,
                         float srcY = coords[baseIdx + c * 2 + 1];
 
                         outPixel[c] = bicubicSample(img.ptr(), w, h, ch, srcX, srcY, c);
+                    }
+
+                    // Uniform OOB mask: zero all 3 channels together when any
+                    // is out of bounds (prevents color fringing).
+                    if (oobMask[static_cast<size_t>(row) * w + col]) {
+                        outPixel[0] = outPixel[1] = outPixel[2] = 0.0f;
                     }
                 }
             }

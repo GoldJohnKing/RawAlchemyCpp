@@ -4,7 +4,7 @@ Generate C++ header with pre-computed gamut transform matrices
 and verify log curve parameters.
 
 Uses colour-science to compute ProPhoto RGB → Target Gamut matrices.
-Output: include/raw_alchemy/color_data.h
+Output: include/color_data.h
 """
 
 import colour
@@ -197,26 +197,22 @@ def generate_cpp_header(matrices, output_path):
     lines.append("        return slope * std::log10(s * mult + 1.0f) + offset;")
     lines.append("    }")
 
-    # Canon Log 3 (v1.2)
+    # Canon Log 3 (v1.2) — clean 3-segment toe/mid/shoulder matching colour-science.
+    # After s = x/0.9, the linear cuts in s-space are ±0.014 (exact in colour-science:
+    # log_decoding_CanonLog3_v1_2(0.097465473) = -0.014; ...(0.15277891) = +0.014).
     lines.append("    case LogCurve::Canon_Log_3: {")
-    lines.append("        // Canon Log 3 (v1.2): three-segment curve")
+    lines.append("        // Canon Log 3 (v1.2): toe/linear/shoulder, cuts at s = ±0.014 (s = x/0.9)")
     lines.append("        constexpr float slope = 0.36726845f;")
     lines.append("        constexpr float lin_slope = 1.9754798f;")
     lines.append("        constexpr float off_neg = 0.12783901f;")
     lines.append("        constexpr float off_lin = 0.12512219f;")
     lines.append("        constexpr float off_pos = 0.12240537f;")
     lines.append("        constexpr float mult = 14.98325f;")
-    lines.append("        constexpr float thr_neg = 0.097465473f;")
-    lines.append("        constexpr float thr_pos = 0.15277891f;")
+    lines.append("        constexpr float cut = 0.014f;")
     lines.append("        float s = x / 0.9f;")
-    lines.append("        if (s < 0.0f) return -slope * std::log10(-s * mult + 1.0f) + off_neg;")
-    lines.append("        float y = slope * std::log10(s * mult + 1.0f) + off_pos;")
-    lines.append("        if (y > thr_pos) return y;")
-    lines.append("        // Linear graft region")
-    lines.append("        float y0 = slope * std::log10(0.0f * mult + 1.0f) + off_pos;")
-    lines.append("        float x0 = (y0 - off_lin) / lin_slope;")
-    lines.append("        if (s < x0) return off_neg;  // negative toe")
-    lines.append("        return lin_slope * s + off_lin;")
+    lines.append("        if (s < -cut) return -slope * std::log10(-s * mult + 1.0f) + off_neg;")
+    lines.append("        if (s <= cut) return lin_slope * s + off_lin;")
+    lines.append("        return slope * std::log10(s * mult + 1.0f) + off_pos;")
     lines.append("    }")
 
     # S-Log3
@@ -266,16 +262,14 @@ def generate_cpp_header(matrices, output_path):
     lines.append("        return std::log10(x * 0.9892f + 0.0108f) * 0.256663f + 0.584555f;")
     lines.append("    }")
 
-    # L-Log (BT.2020 with a custom curve — use S-Log3 as fallback for now, or implement separately)
+    # L-Log (Leica) — matches colour-science CONSTANTS_LLOG:
+    # cut1=0.006, a=8, b=0.09, c=0.27, d=1.3, e=0.0115, f=0.6
+    # (in_reflection=True default ⇒ no /0.9 reflection scaling)
     lines.append("    case LogCurve::L_Log: {")
-    lines.append("        // L-Log: Leica log curve")
-    lines.append("        // Uses ITU-R BT.2020 gamut; curve similar to a generic log")
-    lines.append("        // Fallback: use Canon Log 2 style encoding")
-    lines.append("        constexpr float slope = 0.24136077f;")
-    lines.append("        constexpr float offset = 0.092864125f;")
-    lines.append("        constexpr float mult = 87.09937546f;")
-    lines.append("        if (x < 0.0f) return -slope * std::log10(-x * mult + 1.0f) + offset;")
-    lines.append("        return slope * std::log10(x * mult + 1.0f) + offset;")
+    lines.append("        // L-Log (Leica): cut1=0.006, toe=8x+0.09, log=0.27·log10(1.3x+0.0115)+0.6")
+    lines.append("        constexpr float cut1 = 0.006f;")
+    lines.append("        if (x <= cut1) return 8.0f * x + 0.09f;")
+    lines.append("        return 0.27f * std::log10(1.3f * x + 0.0115f) + 0.6f;")
     lines.append("    }")
 
     lines.append("    default:")
@@ -302,7 +296,7 @@ def main():
 
     output_path = os.path.join(
         os.path.dirname(__file__), '..',
-        'include', 'raw_alchemy', 'color_data.h'
+        'include', 'color_data.h'
     )
     generate_cpp_header(matrices, output_path)
 

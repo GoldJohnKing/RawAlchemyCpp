@@ -1,0 +1,3 @@
+# Make deepwork session state visible to OpenCode search while git-ignored
+!.slim/deepwork/
+!.slim/deepwork/**

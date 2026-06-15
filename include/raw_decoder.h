@@ -13,6 +13,7 @@
  */
 
 #include "common.h"
+#include "raw_mosaic.h"
 #include <string>
 
 namespace rawalchemy {
@@ -66,7 +67,25 @@ struct DecodeParams {
  * @throws std::runtime_error on any error
  */
 ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params = DecodeParams{},
-                       ExifCollector* exifCollector = nullptr);
+                        ExifCollector* exifCollector = nullptr);
+
+/**
+ * @brief Decode a RAW file into a packed CFA mosaic + sensor metadata (Phase 1).
+ *
+ * Sources the un-demosaiced 1-channel buffer from LibRaw's
+ * `imgdata.rawdata.raw_image` (open_file + unpack only; NO dcraw_process).
+ * Copies the visible region only and populates per-channel black, white point,
+ * camera WB, XYZ->cam matrix, CFA pattern and orientation.
+ *
+ * For non-CFA sensors (Foveon / 3-channel color3_image), throws
+ * std::runtime_error so the caller can fall back to decodeRaw()/dcraw_process.
+ *
+ * @param rawPath        Path to the RAW file.
+ * @param exifCollector  Optional EXIF collector (same pattern as decodeRaw()).
+ * @return RawMosaic with raw uint16 sensor data cast to float (NOT normalized).
+ * @throws std::runtime_error on any error or for non-CFA sensors.
+ */
+RawMosaic decodeRawMosaic(const std::string& rawPath, ExifCollector* exifCollector = nullptr);
 
 /**
  * @brief Extract camera/lens EXIF metadata from a RAW file.

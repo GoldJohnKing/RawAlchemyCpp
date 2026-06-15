@@ -192,23 +192,18 @@ inline float logEncode(float x, LogCurve curve) {
         return slope * std::log10(s * mult + 1.0f) + offset;
     }
     case LogCurve::Canon_Log_3: {
-        // Canon Log 3 (v1.2): three-segment curve
+        // Canon Log 3 (v1.2): toe/linear/shoulder, cuts at s = ±0.014 (s = x/0.9)
         constexpr float slope = 0.36726845f;
         constexpr float lin_slope = 1.9754798f;
         constexpr float off_neg = 0.12783901f;
         constexpr float off_lin = 0.12512219f;
         constexpr float off_pos = 0.12240537f;
         constexpr float mult = 14.98325f;
-        constexpr float thr_pos = 0.15277891f;
+        constexpr float cut = 0.014f;
         float s = x / 0.9f;
-        if (s < 0.0f) return -slope * std::log10(-s * mult + 1.0f) + off_neg;
-        float y = slope * std::log10(s * mult + 1.0f) + off_pos;
-        if (y > thr_pos) return y;
-        // Linear graft region
-        float y0 = slope * std::log10(0.0f * mult + 1.0f) + off_pos;
-        float x0 = (y0 - off_lin) / lin_slope;
-        if (s < x0) return off_neg;  // negative toe
-        return lin_slope * s + off_lin;
+        if (s < -cut) return -slope * std::log10(-s * mult + 1.0f) + off_neg;
+        if (s <= cut) return lin_slope * s + off_lin;
+        return slope * std::log10(s * mult + 1.0f) + off_pos;
     }
     case LogCurve::S_Log3: {
         // S-Log3
@@ -224,11 +219,11 @@ inline float logEncode(float x, LogCurve curve) {
     }
     case LogCurve::Arri_LogC4: {
         // ARRI LogC4
-        const float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;
-        const float b = (1023.0f - 95.0f) / 1023.0f;
-        const float c = 95.0f / 1023.0f;
-        const float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);
-        const float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;
+        constexpr float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;
+        constexpr float b = (1023.0f - 95.0f) / 1023.0f;
+        constexpr float c = 95.0f / 1023.0f;
+        constexpr float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);
+        constexpr float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;
         if (x >= t) return (std::log2(a * x + 64.0f) - 6.0f) / 14.0f * b + c;
         return (x - t) / s_val;
     }
@@ -248,14 +243,10 @@ inline float logEncode(float x, LogCurve curve) {
         return std::log10(x * 0.9892f + 0.0108f) * 0.256663f + 0.584555f;
     }
     case LogCurve::L_Log: {
-        // L-Log: Leica log curve
-        // Uses ITU-R BT.2020 gamut; curve similar to a generic log
-        // Fallback: use Canon Log 2 style encoding
-        constexpr float slope = 0.24136077f;
-        constexpr float offset = 0.092864125f;
-        constexpr float mult = 87.09937546f;
-        if (x < 0.0f) return -slope * std::log10(-x * mult + 1.0f) + offset;
-        return slope * std::log10(x * mult + 1.0f) + offset;
+        // L-Log (Leica): cut1=0.006, toe=8x+0.09, log=0.27·log10(1.3x+0.0115)+0.6
+        constexpr float cut1 = 0.006f;
+        if (x <= cut1) return 8.0f * x + 0.09f;
+        return 0.27f * std::log10(1.3f * x + 0.0115f) + 0.6f;
     }
     default:
         return x;  // passthrough

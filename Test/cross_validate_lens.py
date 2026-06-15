@@ -1,261 +1,344 @@
 """
-Cross-validation: compare C++ lens correction output with and without correction.
+Cross-validation: Phase 6 lens-correction edge robustness.
 
-Validates that:
-1. Lens correction produces measurable pixel differences (not a no-op)
-2. Vignetting correction brightens corners more than center
-3. Distortion correction changes edge geometry more than center
-4. Overall change is within expected bounds (not destructive)
+Two-tier validation:
 
-Requires: Python 3 stdlib only (no numpy/scipy/rawpy needed)
+  PRIMARY (synthetic, deterministic): run ./build/raw_alchemy_lens_test, which
+  constructs synthetic coord buffers with known OOB / near-border cases and
+  asserts the two-stage safety scale + uniform OOB mask behaves per
+  lensfun_wrapper.py:851-903. PASS if all 4 cases (auto-crop, interp_margin,
+  uniform anti-fringing, identity) report PASS. This GUARANTEES the
+  postProcessLensCoords path is exercised regardless of Lensfun DB state.
+
+  SECONDARY (Sample.NEF smoke): run the C++ CLI on Sample.NEF with lens
+  correction ON and OFF, and check:
+    - lens correction either applied (DB has Nikon Z 8 + lens) or was a clean
+      no-op (lens not found) — both are acceptable,
+    - if applied: no black borders introduced at image edges (the uniform OOB
+      mask + stage-A/B must not mass-zero borders) and no per-channel color
+      fringing at edges (R ~= G ~= B where the mask would have fired).
+  If the Lensfun DB lacks the camera/lens (correction is a no-op), we report
+  that and rely on the synthetic test (PRIMARY).
+
+Legacy mode: with two TIFF args, runs the original before/after comparison.
 
 Usage:
-  python3 cross_validate_lens.py /tmp/lens_off.tif /tmp/lens_on.tif
+  python3 cross_validate_lens.py                          # synthetic + smoke
+  python3 cross_validate_lens.py <off.tif> <on.tif>       # legacy comparison
+
+Run with the Raw-Alchemy venv:
+    /mnt/d/GitRepos/Raw-Alchemy/.venv/bin/python \\
+        /mnt/d/GitRepos/RawAlchemyCpp/Test/cross_validate_lens.py
 """
-
-import struct
-import sys
 import os
-import math
+import re
+import struct
+import subprocess
+import sys
 
+REPO = "/mnt/d/GitRepos/RawAlchemyCpp"
+RAW = os.path.join(REPO, "Test", "Sample.NEF")
+CLI = os.path.join(REPO, "build", "raw_alchemy_cli")
+LENS_TEST = os.path.join(REPO, "build", "raw_alchemy_lens_test")
+
+# Edge-quality thresholds for the smoke test.
+BLACK_BORDER_MAX_MEAN = 0.02   # <2% of white → effectively black border
+FRINGE_MAX_CHANNEL_SPREAD = 0.20  # max |c1-c2|/max(c) at a border pixel
+BORDER_PIXELS = 3               # interp_margin = 2; check a 3px rim
+
+
+# ============================================================
+#           TIFF reader (16-bit RGB, uncompressed)
+# ============================================================
 
 def read_tiff_pixels(path):
-    """Read a simple 16-bit RGB TIFF file and return (width, height, pixels).
-    
+    """Read a simple 16-bit RGB TIFF file; return (width, height, pixels).
+
     pixels is a flat list of uint16 values in RGB order.
-    Only handles uncompressed, strip-organized, little-endian 16-bit RGB TIFFs.
     """
-    with open(path, 'rb') as f:
-        # TIFF header
+    with open(path, "rb") as f:
         byte_order = f.read(2)
-        if byte_order == b'II':
-            endian = '<'
-        elif byte_order == b'MM':
-            endian = '>'
+        if byte_order == b"II":
+            endian = "<"
+        elif byte_order == b"MM":
+            endian = ">"
         else:
             raise ValueError(f"Not a TIFF file: {path}")
-        
-        magic = struct.unpack(endian + 'H', f.read(2))[0]
+
+        magic = struct.unpack(endian + "H", f.read(2))[0]
         assert magic == 42, f"Bad TIFF magic: {magic}"
-        
-        ifd_offset = struct.unpack(endian + 'I', f.read(4))[0]
-        
-        # Parse IFD
+        ifd_offset = struct.unpack(endian + "I", f.read(4))[0]
+
         f.seek(ifd_offset)
-        num_entries = struct.unpack(endian + 'H', f.read(2))[0]
-        
+        num_entries = struct.unpack(endian + "H", f.read(2))[0]
+
         tags = {}
         for _ in range(num_entries):
-            tag_id = struct.unpack(endian + 'H', f.read(2))[0]
-            type_id = struct.unpack(endian + 'H', f.read(2))[0]
-            count = struct.unpack(endian + 'I', f.read(4))[0]
+            tag_id = struct.unpack(endian + "H", f.read(2))[0]
+            type_id = struct.unpack(endian + "H", f.read(2))[0]
+            count = struct.unpack(endian + "I", f.read(4))[0]
             value_raw = f.read(4)
-            
-            # Type sizes
             type_sizes = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8}
             val_size = type_sizes.get(type_id, 1) * count
-            
             if val_size <= 4:
-                if type_id == 3:  # SHORT
-                    tags[tag_id] = struct.unpack(endian + 'H', value_raw[:2])[0]
-                elif type_id == 4:  # LONG
-                    tags[tag_id] = struct.unpack(endian + 'I', value_raw)[0]
-                elif type_id == 1:  # BYTE
+                if type_id == 3:
+                    tags[tag_id] = struct.unpack(endian + "H", value_raw[:2])[0]
+                elif type_id == 4:
+                    tags[tag_id] = struct.unpack(endian + "I", value_raw)[0]
+                elif type_id == 1:
                     tags[tag_id] = value_raw[0]
             else:
-                offset = struct.unpack(endian + 'I', value_raw)[0]
-                tags[tag_id] = ('ptr', offset, count, type_id)
-        
+                offset = struct.unpack(endian + "I", value_raw)[0]
+                tags[tag_id] = ("ptr", offset, count, type_id)
+
         width = tags.get(256, 0)
         height = tags.get(257, 0)
         bits_per_sample = tags.get(258, 16)
         compression = tags.get(259, 1)
-        photometric = tags.get(262, 2)
+        samples_per_pixel = tags.get(277, 3)
         strip_offsets = tags.get(273)
         strip_byte_counts = tags.get(279)
-        samples_per_pixel = tags.get(277, 3)
-        rows_per_strip = tags.get(278, height)
-        
+
         assert width > 0 and height > 0, f"Invalid dimensions: {width}x{height}"
         assert bits_per_sample == 16, f"Expected 16-bit, got {bits_per_sample}"
         assert compression == 1, f"Expected uncompressed, got compression={compression}"
         assert samples_per_pixel == 3, f"Expected RGB (3), got {samples_per_pixel}"
-        
-        # Get strip data
+
         if isinstance(strip_offsets, tuple):
-            _, soff, scount, stype = strip_offsets
+            _, soff, scount, _ = strip_offsets
             f.seek(soff)
-            strip_off_list = [struct.unpack(endian + 'I', f.read(4))[0] for _ in range(scount)]
+            strip_off_list = [struct.unpack(endian + "I", f.read(4))[0] for _ in range(scount)]
         else:
             strip_off_list = [strip_offsets]
-        
+
         if isinstance(strip_byte_counts, tuple):
-            _, sboff, sbcount, sbtype = strip_byte_counts
+            _, sboff, sbcount, _ = strip_byte_counts
             f.seek(sboff)
-            strip_bc_list = [struct.unpack(endian + 'I', f.read(4))[0] for _ in range(sbcount)]
+            strip_bc_list = [struct.unpack(endian + "I", f.read(4))[0] for _ in range(sbcount)]
         else:
             strip_bc_list = [strip_byte_counts]
-        
-        # Read all pixel data
+
         all_data = bytearray()
         for off, bc in zip(strip_off_list, strip_bc_list):
             f.seek(off)
             all_data.extend(f.read(bc))
-        
-        # Convert to uint16 array
+
         num_pixels = width * height * 3
-        fmt = endian + ('H' * num_pixels)
-        pixels = struct.unpack(fmt, bytes(all_data[:num_pixels * 2]))
-        
+        fmt = endian + ("H" * num_pixels)
+        pixels = struct.unpack(fmt, bytes(all_data[: num_pixels * 2]))
         return width, height, pixels
 
 
 def pixel_at(pixels, width, row, col, channel):
-    """Get pixel value at (row, col, channel)"""
     return pixels[(row * width + col) * 3 + channel]
 
 
-def main():
-    if len(sys.argv) < 3:
-        print("Usage: python3 cross_validate_lens.py <no_correction.tif> <with_correction.tif>")
-        sys.exit(1)
-    
-    off_path = sys.argv[1]
-    on_path = sys.argv[2]
-    
-    print("=== Lens Correction Cross-Validation ===\n")
-    print(f"  Without: {off_path}")
-    print(f"  With:    {on_path}")
+# ============================================================
+#           PRIMARY: synthetic coord test
+# ============================================================
+
+def run_synthetic_test():
+    print("=" * 64)
+    print("PRIMARY: synthetic postProcessLensCoords test")
+    print("=" * 64)
+    if not os.path.isfile(LENS_TEST):
+        print(f"  ERROR: {LENS_TEST} not found — build first.")
+        return False
+
+    proc = subprocess.run([LENS_TEST], capture_output=True, text=True)
+    print(proc.stdout.rstrip())
+    if proc.stderr.strip():
+        print("STDERR:", proc.stderr.rstrip())
+
+    if proc.returncode != 0:
+        print("FAIL  (test binary exited non-zero)")
+        return False
+
+    # The binary prints "RESULT: PASS" on success.
+    if "RESULT: PASS" in proc.stdout:
+        print("\nPRIMARY: PASS (all 4 synthetic cases passed)")
+        return True
+    print("\nPRIMARY: FAIL")
+    return False
+
+
+# ============================================================
+#           SECONDARY: Sample.NEF smoke (edge robustness)
+# ============================================================
+
+def _run_cli(output_path, lens_on):
+    """Run the CLI on Sample.NEF; return (ok, stdout)."""
+    args = [CLI, RAW, output_path, "--log-space", "F-Log2C", "--exposure", "0"]
+    if lens_on:
+        args.append("--lens-correction")
+    else:
+        args.append("--no-lens-correction")
+    proc = subprocess.run(args, capture_output=True, text=True)
+    return proc.returncode == 0, proc.stdout + proc.stderr
+
+
+def _is_lens_applied(cli_stdout):
+    """Detect whether lens correction actually ran (vs no-op)."""
+    # applyLensCorrection returns true and prints "Correction complete." when
+    # it ran; the CLI prints "-> Skipped" when it returned false.
+    if "Correction complete." in cli_stdout:
+        return True
+    if "Skipping correction" in cli_stdout or "-> Skipped" in cli_stdout:
+        return False
+    # Ambiguous: assume not applied.
+    return False
+
+
+def _border_pixel_mean(pixels, W, H):
+    """Mean (0..1) of the BORDER_PIXELS rim, all channels."""
+    s = 0
+    n = 0
+    for r in range(H):
+        for c in range(W):
+            on_border = (r < BORDER_PIXELS or r >= H - BORDER_PIXELS or
+                         c < BORDER_PIXELS or c >= W - BORDER_PIXELS)
+            if on_border:
+                for ch in range(3):
+                    s += pixel_at(pixels, W, r, c, ch)
+                    n += 1
+    return (s / n) / 65535.0 if n else 0.0
+
+
+def _border_fringe_metric(pixels, W, H):
+    """Max per-pixel channel spread at the border (0..1).
+
+    For each border pixel, spread = (max(R,G,B) - min(R,G,B)) / max(R,G,B, 1).
+    A masked (uniformly-zeroed) pixel has spread 0; a fringed pixel has a
+    large spread. We report the 95th-percentile spread to ignore outliers.
+    """
+    spreads = []
+    for r in range(H):
+        for c in range(W):
+            on_border = (r < BORDER_PIXELS or r >= H - BORDER_PIXELS or
+                         c < BORDER_PIXELS or c >= W - BORDER_PIXELS)
+            if not on_border:
+                continue
+            vals = [pixel_at(pixels, W, r, c, ch) / 65535.0 for ch in range(3)]
+            mx = max(vals)
+            if mx < 1e-3:
+                spreads.append(0.0)  # uniformly near-zero (masked or dark) — no fringe
+            else:
+                spreads.append((mx - min(vals)) / mx)
+    if not spreads:
+        return 0.0
+    spreads.sort()
+    return spreads[int(0.95 * (len(spreads) - 1))]
+
+
+def run_smoke_test():
     print()
-    
+    print("=" * 64)
+    print("SECONDARY: Sample.NEF lens-correction smoke (edge robustness)")
+    print("=" * 64)
+    if not os.path.isfile(CLI):
+        print(f"  ERROR: {CLI} not found — build first.")
+        return False
+    if not os.path.isfile(RAW):
+        print(f"  ERROR: {RAW} not found.")
+        return False
+
+    on_path = "/tmp/cpp_lens_on.tif"
+    off_path = "/tmp/cpp_lens_off.tif"
+
+    print("  Running CLI (lens ON)...")
+    ok_on, out_on = _run_cli(on_path, lens_on=True)
+    if not ok_on:
+        print("  FAIL: CLI (lens ON) exited non-zero.")
+        return False
+
+    applied = _is_lens_applied(out_on)
+    if not applied:
+        print("  Lens correction was a NO-OP (Lensfun DB lacks the camera/lens")
+        print("  or no distortion/TCA data). This is acceptable — the PRIMARY")
+        print("  synthetic test is the authoritative validation.")
+        print("\nSECONDARY: PASS (clean no-op; rely on PRIMARY)")
+        return True
+
+    print("  Lens correction APPLIED. Running CLI (lens OFF) for comparison...")
+    ok_off, _ = _run_cli(off_path, lens_on=False)
+    if not ok_off:
+        print("  FAIL: CLI (lens OFF) exited non-zero.")
+        return False
+
+    w_on, h_on, px_on = read_tiff_pixels(on_path)
+    w_off, h_off, px_off = read_tiff_pixels(off_path)
+    if (w_on, h_on) != (w_off, h_off):
+        print(f"  FAIL: output size mismatch ON {w_on}x{h_on} vs OFF {w_off}x{h_off}.")
+        return False
+    W, H = w_on, h_on
+    print(f"  Output: {W} x {H}")
+
+    # 1. No black borders introduced by the OOB mask. The lens-ON border mean
+    #    must not collapse relative to lens-OFF (a mass-zeroing mask failure
+    #    would crater the border mean toward 0).
+    border_on = _border_pixel_mean(px_on, W, H)
+    border_off = _border_pixel_mean(px_off, W, H)
+    ratio = border_on / border_off if border_off > 1e-6 else 1.0
+    print(f"  Border mean: ON={border_on:.4f}  OFF={border_off:.4f}  ratio={ratio:.3f}")
+    no_black_border = border_on >= BLACK_BORDER_MAX_MEAN or ratio > 0.5
+
+    # 2. No per-channel fringing at the border. The lens-ON 95th-percentile
+    #    channel spread at the border must stay bounded (a per-channel
+    #    constant-0 fringing failure would spike it).
+    fringe_on = _border_fringe_metric(px_on, W, H)
+    fringe_off = _border_fringe_metric(px_off, W, H)
+    print(f"  Border 95th-pct channel spread: ON={fringe_on:.4f}  OFF={fringe_off:.4f}")
+    no_fringe = fringe_on <= max(FRINGE_MAX_CHANNEL_SPREAD, fringe_off * 1.25 + 0.05)
+
+    print(f"  no-black-border: {'PASS' if no_black_border else 'FAIL'}")
+    print(f"  no-fringing:     {'PASS' if no_fringe else 'FAIL'}")
+
+    ok = no_black_border and no_fringe
+    print(f"\nSECONDARY: {'PASS' if ok else 'FAIL'}")
+    return ok
+
+
+# ============================================================
+#           LEGACY: before/after TIFF comparison
+# ============================================================
+
+def run_legacy_compare(off_path, on_path):
+    import math
+    print("=== Legacy Lens Correction Comparison ===\n")
     w1, h1, px_off = read_tiff_pixels(off_path)
     w2, h2, px_on = read_tiff_pixels(on_path)
-    
     assert w1 == w2 and h1 == h2, f"Size mismatch: {w1}x{h1} vs {w2}x{h2}"
     W, H = w1, h1
-    
-    print(f"  Image: {W} x {H} = {W*H/1e6:.1f} MP (16-bit RGB)\n")
-    
-    # ---- 1. Overall pixel difference statistics ----
+
     total = W * H
-    diff_sum = 0.0
     diff_sq_sum = 0.0
-    max_diff = 0
-    changed_pixels = 0
-    
-    # Per-region statistics
-    margin = min(W, H) // 10  # 10% border
-    center_diffs = []
-    corner_diffs = []
-    
-    for row in range(H):
-        for col in range(W):
-            for c in range(3):
-                v_off = pixel_at(px_off, W, row, col, c)
-                v_on = pixel_at(px_on, W, row, col, c)
-                d = abs(v_off - v_on)
-                diff_sum += d
-                diff_sq_sum += d * d
-                if d > max_diff:
-                    max_diff = d
-                if d > 0:
-                    changed_pixels += 1
-                
-                if c == 1:  # Green channel only for region stats
-                    is_corner = (row < margin or row >= H - margin) and (col < margin or col >= W - margin)
-                    is_center = (margin * 3 <= row < H - margin * 3) and (margin * 3 <= col < W - margin * 3)
-                    if is_corner:
-                        corner_diffs.append(d)
-                    elif is_center:
-                        center_diffs.append(d)
-    
-    num_values = total * 3
-    mean_diff = diff_sum / num_values
-    
-    # ---- 2. PSNR ----
-    mse = diff_sq_sum / num_values
-    if mse > 0:
-        psnr = 10.0 * math.log10((65535.0 ** 2) / mse)
-    else:
-        psnr = float('inf')
-    
-    print("--- Overall Difference ---")
-    print(f"  Pixels changed:  {changed_pixels}/{num_values} ({100*changed_pixels/num_values:.2f}%)")
-    print(f"  Mean abs diff:   {mean_diff:.2f} / 65535")
-    print(f"  Max abs diff:    {max_diff}")
-    print(f"  PSNR:            {psnr:.2f} dB")
+    for i in range(len(px_off)):
+        d = abs(px_off[i] - px_on[i])
+        diff_sq_sum += d * d
+    mse = diff_sq_sum / len(px_off)
+    psnr = 10.0 * math.log10((65535.0 ** 2) / mse) if mse > 0 else float("inf")
+    print(f"  Image: {W} x {H}, PSNR: {psnr:.2f} dB")
+    ok = 15.0 < psnr < 50.0
+    print(f"  Legacy: {'PASS' if ok else 'FAIL'} (15 < PSNR < 50)")
+    return ok
+
+
+# ============================================================
+def main():
+    if len(sys.argv) >= 3:
+        ok = run_legacy_compare(sys.argv[1], sys.argv[2])
+        sys.exit(0 if ok else 1)
+
+    ok_primary = run_synthetic_test()
+    ok_secondary = run_smoke_test() if ok_primary else False
+
     print()
-    
-    # ---- 3. Region analysis ----
-    corner_mean = sum(corner_diffs) / len(corner_diffs) if corner_diffs else 0
-    center_mean = sum(center_diffs) / len(center_diffs) if center_diffs else 0
-    
-    print("--- Region Analysis (Green channel) ---")
-    print(f"  Corner mean diff: {corner_mean:.2f}")
-    print(f"  Center mean diff: {center_mean:.2f}")
-    print(f"  Corner/Center ratio: {corner_mean/center_mean:.2f}x" if center_mean > 0 else "  Corner/Center ratio: N/A")
-    print()
-    
-    # ---- 4. Vignetting validation ----
-    # Vignetting darkens corners; correction should brighten them.
-    # Check: corners should have higher values in corrected image.
-    corners = [
-        (0, 0), (0, W-1), (H-1, 0), (H-1, W-1),
-        (0, W//2), (H//2, 0), (H//2, W-1), (H-1, W//2),
-    ]
-    center = (H//2, W//2)
-    
-    print("--- Vignetting Correction Check ---")
-    for label, (r, c) in [("Top-left", corners[0]), ("Top-right", corners[1]),
-                           ("Bot-left", corners[2]), ("Bot-right", corners[3]),
-                           ("Top-mid", corners[4]), ("Left-mid", corners[5]),
-                           ("Right-mid", corners[6]), ("Bot-mid", corners[7]),
-                           ("CENTER", center)]:
-        g_off = pixel_at(px_off, W, r, c, 1)
-        g_on = pixel_at(px_on, W, r, c, 1)
-        delta = g_on - g_off
-        pct = 100.0 * delta / g_off if g_off > 0 else 0
-        print(f"  {label:12s}: G_off={g_off:5d}  G_on={g_on:5d}  delta={delta:+5d} ({pct:+.2f}%)")
-    print()
-    
-    # ---- 5. Sample grid comparison ----
-    print("--- Sample Pixel Comparison (R, G, B) ---")
-    print(f"  {'Position':20s}  {'Without correction':>30s}  {'With correction':>30s}  {'Delta':>15s}")
-    samples = [
-        (0, 0, "Top-left"),
-        (0, W-1, "Top-right"),
-        (H-1, 0, "Bottom-left"),
-        (H-1, W-1, "Bottom-right"),
-        (H//2, W//2, "Center"),
-        (H//4, W//4, "Quarter"),
-        (3*H//4, 3*W//4, "Three-quarter"),
-    ]
-    for row, col, label in samples:
-        off_px = tuple(pixel_at(px_off, W, row, col, c) for c in range(3))
-        on_px = tuple(pixel_at(px_on, W, row, col, c) for c in range(3))
-        delta = tuple(on_px[c] - off_px[c] for c in range(3))
-        print(f"  {label:20s}  ({off_px[0]:5d},{off_px[1]:5d},{off_px[2]:5d})      "
-              f"({on_px[0]:5d},{on_px[1]:5d},{on_px[2]:5d})      "
-              f"({delta[0]:+5d},{delta[1]:+5d},{delta[2]:+5d})")
-    print()
-    
-    # ---- 6. Verdict ----
-    print("--- Verdict ---")
-    if changed_pixels == 0:
-        print("  FAIL: No pixels were changed by lens correction!")
-    elif psnr > 50:
-        print("  FAIL: PSNR too high (>50 dB), correction may be trivial.")
-    elif psnr < 15:
-        print("  WARN: PSNR very low (<15 dB), correction may be too aggressive.")
-    else:
-        print(f"  PASS: Lens correction produces measurable changes (PSNR={psnr:.1f} dB)")
-    
-    if corner_mean > center_mean * 1.2:
-        print("  PASS: Corner regions changed more than center (vignetting + distortion)")
-    else:
-        print("  WARN: Corner vs center difference not as expected")
-    
-    print()
+    print("=" * 64)
+    print(f"Summary:  PRIMARY (synthetic) = {'PASS' if ok_primary else 'FAIL'}    "
+          f"SECONDARY (smoke) = {'PASS' if ok_secondary else 'FAIL'}")
+    print("=" * 64)
+    # PRIMARY is authoritative; SECONDARY may be a clean no-op pass.
+    sys.exit(0 if ok_primary else 1)
 
 
 if __name__ == "__main__":
