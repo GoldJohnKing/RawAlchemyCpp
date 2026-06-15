@@ -9,6 +9,9 @@
 
 #include "colorspace_matrices.h"
 
+#include <stdexcept>  // std::runtime_error (MSVC doesn't pull it in transitively)
+#include <string>     // std::to_string
+
 namespace rawalchemy {
 
 // ============================================================

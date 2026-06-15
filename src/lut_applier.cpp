@@ -13,6 +13,7 @@
 #include "lut_applier.h"
 
 #include <cstdio>
+#include <string>     // std::to_string (MSVC doesn't pull it in transitively)
 #include <cstdlib>
 #include <cstring>
 #include <cmath>

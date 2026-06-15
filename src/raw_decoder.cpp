@@ -29,6 +29,8 @@
 #include <libraw/libraw.h>
 #include <cstdio>
 #include <cstring>
+#include <stdexcept>  // std::runtime_error (MSVC doesn't pull it in transitively)
+#include <string>     // std::string / std::to_string
 
 namespace rawalchemy {
 
