@@ -313,37 +313,24 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
 }
 
 // ----------------------------------------------------------------
-//  Custom CPU demosaic pipeline (Phases 1-5) — with Foveon fallback
+//  Custom CPU demosaic pipeline (Phases 1-5)
 // ----------------------------------------------------------------
 
 // Decode + run the custom CPU demosaic pipeline (Phases 1-5).
 //
+// Non-CFA / Foveon sensors are filtered OUT upstream: the entry points call
+// extractMetadata() first and route isNonCfa files to decodeRaw()/dcraw before
+// this helper is ever invoked. So decodeRawMosaic is never called on a sensor
+// it can't handle, and no try/catch fallback is needed here — any throw from
+// decodeRawMosaic (open/unpack failure) is a real error that propagates.
+//
 // The exifCollector is passed THROUGH to decodeRawMosaic, which wires the EXIF
 // callback before open_file (raw_decoder.cpp:195-197, same pattern as
-// decodeRaw), restoring the old C API's JPEG-EXIF behavior on the custom path.
-//
-// Fallback: Foveon / non-CFA sensors (and any decodeRawMosaic open/unpack
-// failure) throw std::runtime_error — on that single case, fall back to the
-// LibRaw dcraw path (which handles non-CFA sensors natively) instead of
-// surfacing RA_ERR_UNKNOWN. The catch is scoped to decodeRawMosaic ONLY, so
-// any throw from the later custom-path steps (black/hot-pixel/highlight/
-// demosaic/matrix) still propagates as a real error.
-//
-// EXIF on fallback: decodeRawMosaic runs open_file (firing the EXIF callback)
-// BEFORE the raw_image==nullptr check, so on the fallback path the collector
-// may already hold tags. clearExifCollector() resets it so dcraw re-collects
-// cleanly, avoiding duplicate tags in the JPEG APP1 blob.
+// decodeRaw) — single EXIF collection on the custom path.
 rawalchemy::ImageBuffer decodeImageWithCustomPipeline(
     const std::string& inputPath,
     rawalchemy::ExifCollector* exifCollector) {
-    rawalchemy::RawMosaic mosaic;
-    try {
-        mosaic = rawalchemy::decodeRawMosaic(inputPath, exifCollector);
-    } catch (const std::runtime_error&) {
-        // Foveon / non-CFA / probe failure -> LibRaw dcraw fallback.
-        if (exifCollector) rawalchemy::clearExifCollector(exifCollector);
-        return rawalchemy::decodeRaw(inputPath, rawalchemy::DecodeParams{}, exifCollector);
-    }
+    auto mosaic = rawalchemy::decodeRawMosaic(inputPath, exifCollector);
 
     rawalchemy::subtractBlackLevel(mosaic);
     rawalchemy::fixHotPixels(mosaic);
@@ -410,14 +397,14 @@ RA_API RaResult RA_CALL raProcessFile(
         rawalchemy::ExifCollector* exifCollector = isJpeg
             ? rawalchemy::createExifCollector() : nullptr;
 
-        // Decode + run the custom CPU demosaic pipeline (Phases 1-5).
-        // Returns a ProPhoto RGB linear ImageBuffer consumed unchanged by
-        // runPipeline below. exifCollector is passed through so JPEG output
-        // retains EXIF.
-        auto img = decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
-
-        // Metadata (for lens correction)
+        // Probe sensor type first (extractMetadata is a metadata-only open_file,
+        // cheap — no unpack/dcraw_process). Route non-CFA/Foveon sensors to
+        // decodeRaw/dcraw; everything else to the custom pipeline. EXIF is
+        // collected exactly once, by the chosen decode path.
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
+        auto img = meta.isNonCfa
+            ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, exifCollector)
+            : decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,
@@ -484,12 +471,11 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         rawalchemy::ExifCollector* exifCollector = isJpeg
             ? rawalchemy::createExifCollector() : nullptr;
 
-        // Decode + run the custom CPU demosaic pipeline (Phases 1-5).
-        // Returns a ProPhoto RGB linear ImageBuffer consumed unchanged by
-        // runPipeline below. exifCollector is passed through so JPEG output
-        // retains EXIF.
-        auto img = decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
+        // Probe sensor type first; route non-CFA/Foveon to dcraw, else custom.
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
+        auto img = meta.isNonCfa
+            ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, exifCollector)
+            : decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
 
         rawalchemy::LUT3D lut;
         const rawalchemy::LUT3D* lutPtr = nullptr;
@@ -560,12 +546,12 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     clearError();
 
     try {
-        // Decode + run the custom CPU demosaic pipeline (Phases 1-5).
+        // Probe sensor type first; route non-CFA/Foveon to dcraw, else custom.
         // No EXIF collector for the buffer entry point.
-        auto img = decodeImageWithCustomPipeline(std::string(inputPath), nullptr);
-
-        // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
+        auto img = meta.isNonCfa
+            ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, nullptr)
+            : decodeImageWithCustomPipeline(std::string(inputPath), nullptr);
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,

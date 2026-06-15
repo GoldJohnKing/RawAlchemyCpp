@@ -63,12 +63,6 @@ void destroyExifCollector(ExifCollector* collector) {
     delete collector;
 }
 
-void clearExifCollector(ExifCollector* collector) {
-    if (!collector) return;
-    collector->tags.clear();
-    collector->byteOrderSet = false;
-}
-
 // ----------------------------------------------------------------
 //  LibRaw exif_parser_callback handler
 // ----------------------------------------------------------------

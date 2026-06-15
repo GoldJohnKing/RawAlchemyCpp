@@ -100,6 +100,12 @@ struct CameraMetadata {
     float       focalLength = 0.0f;
     float       aperture    = 0.0f;
     int         isoSpeed    = 0;
+
+    /// True for non-CFA sensors (Foveon / 3-channel) that the custom demosaic
+    /// pipeline cannot handle. Callers route these to decodeRaw()/dcraw.
+    /// Populated by extractMetadata() from idata.is_foveon / idata.filters
+    /// (both available after open_file, before unpack).
+    bool        isNonCfa = false;
 };
 
 CameraMetadata extractMetadata(const std::string& rawPath);
