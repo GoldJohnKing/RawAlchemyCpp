@@ -17,7 +17,7 @@
 #include <filesystem>
 
 #ifdef _WIN32
-#include <direct.h>
+// (no direct.h needed — std::filesystem is used for directory ops)
 #else
 #include <sys/stat.h>
 #endif

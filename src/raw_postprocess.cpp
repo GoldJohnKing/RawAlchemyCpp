@@ -10,7 +10,6 @@
 #include "raw_postprocess.h"
 
 #include <cstdio>
-#include <cstring>
 
 #ifdef RA_USE_OPENMP
 #include <omp.h>

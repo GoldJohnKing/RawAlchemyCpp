@@ -332,6 +332,7 @@ set(RA_LIBRARY_SOURCES
     src/demosaic_xtrans.cpp
     src/colorspace_matrices.cpp
     src/raw_postprocess.cpp
+    src/raw_pipeline.cpp
     src/tiff_writer.cpp
     src/jpeg_writer.cpp
     src/log_transform.cpp

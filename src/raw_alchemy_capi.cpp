@@ -6,12 +6,7 @@
 #include "raw_alchemy_capi.h"
 
 #include "raw_decoder.h"
-#include "raw_mosaic.h"
-#include "raw_preprocess.h"
-#include "highlight.h"
-#include "demosaic.h"
-#include "colorspace_matrices.h"
-#include "raw_postprocess.h"
+#include "raw_pipeline.h"
 #include "metering.h"
 #include "stylize.h"
 #include "log_transform.h"
@@ -312,56 +307,6 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
     return RA_OK;
 }
 
-// ----------------------------------------------------------------
-//  Custom CPU demosaic pipeline (Phases 1-5)
-// ----------------------------------------------------------------
-
-// Decode + run the custom CPU demosaic pipeline (Phases 1-5).
-//
-// Non-CFA / Foveon sensors are filtered OUT upstream: the entry points call
-// extractMetadata() first and route isNonCfa files to decodeRaw()/dcraw before
-// this helper is ever invoked. So decodeRawMosaic is never called on a sensor
-// it can't handle, and no try/catch fallback is needed here — any throw from
-// decodeRawMosaic (open/unpack failure) is a real error that propagates.
-//
-// The exifCollector is passed THROUGH to decodeRawMosaic, which wires the EXIF
-// callback before open_file (raw_decoder.cpp:195-197, same pattern as
-// decodeRaw) — single EXIF collection on the custom path.
-rawalchemy::ImageBuffer decodeImageWithCustomPipeline(
-    const std::string& inputPath,
-    rawalchemy::ExifCollector* exifCollector) {
-    auto mosaic = rawalchemy::decodeRawMosaic(inputPath, exifCollector);
-
-    rawalchemy::subtractBlackLevel(mosaic);
-    rawalchemy::fixHotPixels(mosaic);
-    rawalchemy::highlightInpaintOpposed(mosaic);
-
-    rawalchemy::ImageBuffer img = (mosaic.filters == 9)
-        ? rawalchemy::xtransMarkesteijnDemosaic(mosaic)
-        : rawalchemy::rcdDemosaic(mosaic);
-
-    // WB multiply (green-anchored) on demosaiced RGB.
-    rawalchemy::applyWhiteBalance(img, mosaic.cam_mul);
-    // Orientation flip (post-demosaic, on RGB).
-    rawalchemy::applyFlip(img, mosaic.flip);
-
-    // Camera -> ProPhoto RGB matrix (float64-derived, cast here to float[3][3]).
-    auto M = rawalchemy::cameraToProphotoMatrix(mosaic);
-    float Mf[3][3] = {
-        {M[0][0], M[0][1], M[0][2]},
-        {M[1][0], M[1][1], M[1][2]},
-        {M[2][0], M[2][1], M[2][2]},
-    };
-    rawalchemy::applyColorMatrix(img, Mf);
-
-    // Clip to [0,1] — same call main.cpp uses after the matrix
-    // (main.cpp:441-443: explicit loop, NOT ImageBuffer::clamp()).
-    for (auto& v : img.data) {
-        v = std::max(0.0f, std::min(1.0f, v));
-    }
-    return img;
-}
-
 } // anonymous namespace
 
 // ----------------------------------------------------------------
@@ -404,7 +349,7 @@ RA_API RaResult RA_CALL raProcessFile(
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
         auto img = meta.isNonCfa
             ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, exifCollector)
-            : decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
+            : rawalchemy::decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,
@@ -475,7 +420,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
         auto img = meta.isNonCfa
             ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, exifCollector)
-            : decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
+            : rawalchemy::decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
 
         rawalchemy::LUT3D lut;
         const rawalchemy::LUT3D* lutPtr = nullptr;
@@ -551,7 +496,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
         auto img = meta.isNonCfa
             ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, nullptr)
-            : decodeImageWithCustomPipeline(std::string(inputPath), nullptr);
+            : rawalchemy::decodeImageWithCustomPipeline(std::string(inputPath), nullptr);
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,

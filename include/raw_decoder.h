@@ -21,8 +21,6 @@ namespace rawalchemy {
 /// Forward declaration — see exif_injector.h for full API
 struct ExifCollector;
 
-struct ExifCollector;  // Forward declaration — see exif_injector.h
-
 /// Decoder configuration — mirrors rawpy postprocess parameters
 struct DecodeParams {
     /// Output color space: 4 = ProPhoto RGB (default, matches Python project)
@@ -101,11 +99,15 @@ struct CameraMetadata {
     float       aperture    = 0.0f;
     int         isoSpeed    = 0;
 
-    /// True for non-CFA sensors (Foveon / 3-channel) that the custom demosaic
-    /// pipeline cannot handle. Callers route these to decodeRaw()/dcraw.
-    /// Populated by extractMetadata() from idata.is_foveon / idata.filters
-    /// (both available after open_file, before unpack).
+    /// True for sensors the custom pipeline cannot handle: Foveon/non-CFA,
+    /// 4-color, 2D-darkframe. Callers route these to decodeRaw()/dcraw.
+    /// Populated by extractMetadata() from idata.is_foveon / idata.filters /
+    /// idata.colors / color.cblack[4..5] (all available after open_file).
     bool        isNonCfa = false;
+
+    /// LibRaw CFA filter code; ==9 means X-Trans. For dispatch (rcd/xtrans
+    /// sensor mismatch). Populated by extractMetadata() from idata.filters.
+    unsigned    filters = 0;
 };
 
 CameraMetadata extractMetadata(const std::string& rawPath);

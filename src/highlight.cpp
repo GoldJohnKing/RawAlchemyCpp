@@ -29,22 +29,8 @@
 
 namespace rawalchemy {
 
-// CFA color helper (Bayer FC macro / X-Trans 6x6 lookup).
-// Returns raw color index (Bayer: 0/1/2/3; X-Trans: 0/1/2).
-//
-// NOTE: the FC shift must be computed with explicit parens — `<<` binds
-// tighter than `|` in C, so the naive transcription
-// `(f >> (((r<<1)&14) | (c&1)) << 1) & 3` parses as
-// `((f >> (...)) << 1) & 3`, which is wrong. We compute the shift amount
-// separately to avoid the precedence trap.
-static inline int cfaColorAt(const RawMosaic& m, int r, int c) {
-    if (m.filters == 9) {
-        return static_cast<int>(m.xtrans[((r % 6) + 6) % 6][((c % 6) + 6) % 6]);
-    }
-    const unsigned f = m.filters;
-    const int shift = ((((r << 1) & 14) | (c & 1)) << 1);
-    return static_cast<int>((f >> shift) & 3);
-}
+// CFA color lookup uses the canonical cfaColor() from raw_mosaic.h (included
+// via highlight.h) — no local duplicate.
 
 // ============================================================
 //                  Hand-rolled primitives
@@ -277,7 +263,7 @@ void highlightInpaintOpposed(RawMosaic& m) {
     std::vector<uint8_t> color_map(N);
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
-            int c = cfaColorAt(m, y, x);
+            int c = cfaColor(m, y, x);
             if (c >= 3) c = 1;
             color_map[static_cast<size_t>(y) * W + x] = static_cast<uint8_t>(c);
         }

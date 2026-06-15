@@ -9,8 +9,6 @@
 
 #include "colorspace_matrices.h"
 
-#include <cstdio>
-
 namespace rawalchemy {
 
 // ============================================================

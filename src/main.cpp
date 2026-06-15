@@ -13,6 +13,7 @@
 #include "demosaic.h"
 #include "colorspace_matrices.h"
 #include "raw_postprocess.h"
+#include "raw_pipeline.h"
 #include "metering.h"
 #include "stylize.h"
 #include "log_transform.h"
@@ -110,8 +111,10 @@ static void printUsage(const char* prog) {
         "                     Demosaic auto-selects by sensor: Markesteijn\n"
         "                     1-pass for X-Trans (filters==9), RCD otherwise.\n"
         "                     Prints 'DEMOSAIC W H' to stdout for\n"
-        "                     cross-validation. Diagnostic only — full\n"
-        "                     --demosaic output wiring (WB+matrix) is Phase 5.\n"
+        "                     cross-validation. Diagnostic only — by design this\n"
+        "                     dump shows PRE-WB / PRE-matrix camera RGB; the full\n"
+        "                     --demosaic path adds WB, flip, and the camera->ProPhoto\n"
+        "                     matrix in the normal decode (raw_pipeline.cpp).\n"
         "  --dump-matrix PATH Debug: derive the Camera->ProPhoto matrix for the\n"
         "                     input RAW and write it (3 lines x 3 floats, row-\n"
         "                     major, whitespace-separated, full precision) to\n"
@@ -359,114 +362,57 @@ int main(int argc, char* argv[]) {
 
         // ============================================================
         // Phase 5: route between the custom CPU demosaic pipeline
-        // (decodeRawMosaic -> preprocess -> highlight -> demosaic ->
-        // WB -> flip -> camera->ProPhoto matrix) and the legacy dcraw
-        // path (decodeRaw -> dcraw_process). Both produce a ProPhoto RGB
-        // linear ImageBuffer that the downstream consumes.
+        // (decodeImageWithCustomPipeline — the shared helper in raw_pipeline,
+        // also used by the C API) and the legacy dcraw path
+        // (decodeRaw -> dcraw_process). Both produce a ProPhoto RGB linear
+        // ImageBuffer that the downstream consumes.
         // ============================================================
         enum class DecodePath { Custom, Dcraw };
         DecodePath path = DecodePath::Dcraw;
 
         if (demosaicMode == "ahd") {
-            // Explicit dcraw/AHD — skip the mosaic probe entirely.
+            // Explicit dcraw/AHD.
             path = DecodePath::Dcraw;
         } else {
-            // Probe the mosaic to learn sensor type (filters/colors/darkframe).
-            // decodeRawMosaic throws for non-CFA (Foveon) sensors.
-            try {
-                auto mosaic = rawalchemy::decodeRawMosaic(inputPath);
-
-                if (mosaic.has_2d_darkframe) {
-                    // 2D darkframe isn't applied in the custom path — rare
-                    // medium-format / some Sony sensors. Fall back + warn.
-                    fprintf(stderr,
-                        "Warning: sensor has a 2D darkframe (cblack[4..5]); "
-                        "falling back to dcraw path (custom pipeline does not "
-                        "apply the 2D darkframe).\n");
-                    path = DecodePath::Dcraw;
-                } else if (mosaic.is_foveon || mosaic.filters == 0) {
-                    // Non-CFA sensor — dcraw only.
-                    path = DecodePath::Dcraw;
-                } else if (mosaic.colors == 4) {
-                    // 4-color RGBE/RGBG2 — enforce dcraw fallback.
-                    path = DecodePath::Dcraw;
-                } else if (demosaicMode == "auto") {
-                    path = DecodePath::Custom;  // RCD on Bayer, Markesteijn on X-Trans.
-                } else if (demosaicMode == "rcd") {
-                    if (mosaic.filters == 9) {
-                        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
-                        fprintf(stderr,
-                            "Error: --demosaic rcd requires a Bayer sensor "
-                            "(this sensor reports filters==9 / X-Trans).\n");
-                        return 1;
-                    }
-                    path = DecodePath::Custom;
-                } else if (demosaicMode == "xtrans") {
-                    if (mosaic.filters != 9) {
-                        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
-                        fprintf(stderr,
-                            "Error: --demosaic xtrans requires an X-Trans "
-                            "sensor (filters==9; this sensor is Bayer or other).\n");
-                        return 1;
-                    }
-                    path = DecodePath::Custom;
-                }
-
-                if (path == DecodePath::Custom) {
-                    // Run the full custom CPU RAW pipeline.
-                    printf("  [custom path] mosaic %dx%d filters=0x%x colors=%d\n",
-                           mosaic.width, mosaic.height, mosaic.filters, mosaic.colors);
-                    rawalchemy::subtractBlackLevel(mosaic);
-                    rawalchemy::fixHotPixels(mosaic);
-                    rawalchemy::highlightInpaintOpposed(mosaic);
-                    auto camRgb = (mosaic.filters == 9)
-                        ? rawalchemy::xtransMarkesteijnDemosaic(mosaic)
-                        : rawalchemy::rcdDemosaic(mosaic);
-
-                    // WB multiply (green-anchored) on demosaiced RGB.
-                    rawalchemy::applyWhiteBalance(camRgb, mosaic.cam_mul);
-                    // Orientation flip (post-demosaic, on RGB).
-                    rawalchemy::applyFlip(camRgb, mosaic.flip);
-
-                    // Camera -> ProPhoto RGB matrix (float64-derived, cast here).
-                    auto M = rawalchemy::cameraToProphotoMatrix(mosaic);
-                    float Mf[3][3] = {
-                        {M[0][0], M[0][1], M[0][2]},
-                        {M[1][0], M[1][1], M[1][2]},
-                        {M[2][0], M[2][1], M[2][2]},
-                    };
-                    rawalchemy::applyColorMatrix(camRgb, Mf);
-                    // Clip to [0,1] — matches the Python reference (core.py:221)
-                    // and the dcraw path's uint16->float normalization.
-                    for (auto& v : camRgb.data) {
-                        v = std::max(0.0f, std::min(1.0f, v));
-                    }
-                    img = std::move(camRgb);
-                }
-                // else: fall through to the dcraw path below (double-decode;
-                // the mosaic probe is discarded).
-            } catch (const std::exception& e) {
-                // Non-CFA sensor (decodeRawMosaic threw) — fall back to dcraw.
-                // Only an error if the user explicitly asked for rcd/xtrans.
-                if (demosaicMode == "rcd" || demosaicMode == "xtrans") {
+            // Probe sensor type via the metadata already extracted at Step 0
+            // (cheap open_file — no unpack, no mosaic decode, no EXIF side
+            // effects). isNonCfa covers Foveon/non-CFA/4-color/2D-darkframe;
+            // filters distinguishes Bayer vs X-Trans for rcd/xtrans dispatch.
+            if (meta.isNonCfa) {
+                path = DecodePath::Dcraw;
+            } else if (demosaicMode == "auto") {
+                path = DecodePath::Custom;  // RCD on Bayer, Markesteijn on X-Trans
+            } else if (demosaicMode == "rcd") {
+                if (meta.filters == 9) {
                     if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
                     fprintf(stderr,
-                        "Error: --demosaic %s not supported for this sensor (%s).\n",
-                        demosaicMode.c_str(), e.what());
+                        "Error: --demosaic rcd requires a Bayer sensor "
+                        "(this sensor reports filters==9 / X-Trans).\n");
                     return 1;
                 }
-                path = DecodePath::Dcraw;
+                path = DecodePath::Custom;
+            } else if (demosaicMode == "xtrans") {
+                if (meta.filters != 9) {
+                    if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
+                    fprintf(stderr,
+                        "Error: --demosaic xtrans requires an X-Trans "
+                        "sensor (filters==9; this sensor is Bayer or other).\n");
+                    return 1;
+                }
+                path = DecodePath::Custom;
             }
         }
 
-        if (path == DecodePath::Dcraw) {
-            printf("  [dcraw path] LibRaw dcraw_process (AHD demosaic + ProPhoto matrix)\n");
-            try {
-                img = rawalchemy::decodeRaw(inputPath, params, exifCollector);
-            } catch (...) {
-                if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
-                throw;
-            }
+        // Single decode on whichever path the dispatch chose (EXIF collected
+        // once, by the chosen decode — the custom helper passes the collector
+        // THROUGH to decodeRawMosaic, fixing the old probe-without-collector
+        // bug where CLI custom JPEGs lost EXIF).
+        if (path == DecodePath::Custom) {
+            printf("  [custom path] RCD/Markesteijn + analytical matrix\n");
+            img = rawalchemy::decodeImageWithCustomPipeline(inputPath, exifCollector);
+        } else {
+            printf("  [dcraw path] LibRaw dcraw_process (AHD + ProPhoto matrix)\n");
+            img = rawalchemy::decodeRaw(inputPath, params, exifCollector);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();

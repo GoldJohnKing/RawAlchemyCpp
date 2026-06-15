@@ -305,10 +305,17 @@ CameraMetadata extractMetadata(const std::string& rawPath) {
     meta.aperture    = static_cast<float>(other.aperture);
     meta.isoSpeed    = static_cast<int>(other.iso_speed);
 
-    // Sensor type (populated by open_file, no unpack needed). Non-CFA sensors
-    // (Foveon / 3-channel color3_image) have is_foveon != 0 or filters == 0;
-    // these can't be handled by the custom RCD/Markesteijn pipeline.
-    meta.isNonCfa = (idata.is_foveon != 0) || (idata.filters == 0);
+    // Sensor type (populated by open_file, no unpack needed). isNonCfa covers
+    // every sensor the custom RCD/Markesteijn pipeline cannot handle: Foveon /
+    // non-CFA (filters==0), 4-color RGBE/RGBG2, and sensors with a 2D
+    // darkframe (cblack[4..5]) that the custom path does not apply. Also
+    // expose the CFA filter code for rcd/xtrans dispatch.
+    meta.filters  = idata.filters;
+    meta.isNonCfa = (idata.is_foveon != 0)
+                 || (idata.filters == 0)
+                 || (idata.colors == 4)
+                 || (rawProcessor.imgdata.color.cblack[4] != 0)
+                 || (rawProcessor.imgdata.color.cblack[5] != 0);
 
     return meta;
 }
