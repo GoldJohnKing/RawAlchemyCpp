@@ -448,6 +448,25 @@ if(BUILD_CLI)
     add_executable(raw_alchemy_lens_test src/lens_test.cpp)
     target_link_libraries(raw_alchemy_lens_test PRIVATE raw_alchemy_core)
 
+    # ---- C API end-to-end test (requires BUILD_CAPI) ----
+    # Links raw_alchemy_core (static lib already contains the C API symbols).
+    # Calls raProcessFileWithLUT on a real RAW file and writes a TIFF.
+    if(BUILD_CAPI)
+        add_executable(raw_alchemy_capi_test src/capi_test.cpp)
+        target_link_libraries(raw_alchemy_capi_test PRIVATE raw_alchemy_core)
+
+        # Windows: place executable next to the DLL so it can find it at runtime
+        if(WIN32 AND BUILD_SHARED)
+            set_target_properties(raw_alchemy_capi_test PROPERTIES
+                RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
+            )
+        endif()
+
+        if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(raw_alchemy_capi_test PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+    endif()
+
     # Windows: place executables next to the DLL so they can find it at runtime
     if(WIN32 AND BUILD_SHARED)
         set_target_properties(raw_alchemy_cli raw_alchemy_verify

@@ -6,6 +6,12 @@
 #include "raw_alchemy_capi.h"
 
 #include "raw_decoder.h"
+#include "raw_mosaic.h"
+#include "raw_preprocess.h"
+#include "highlight.h"
+#include "demosaic.h"
+#include "colorspace_matrices.h"
+#include "raw_postprocess.h"
 #include "metering.h"
 #include "stylize.h"
 #include "log_transform.h"
@@ -306,6 +312,54 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
     return RA_OK;
 }
 
+// ----------------------------------------------------------------
+//  Custom CPU demosaic pipeline (Phases 1-5) — direct, no fallback
+// ----------------------------------------------------------------
+
+// Decode + run the custom CPU demosaic pipeline (Phases 1-5). Direct overwrite
+// of the original scheme: new pipeline ONLY, no dcraw fallback / probe dance.
+//
+// The exifCollector is passed THROUGH to decodeRawMosaic, which wires the EXIF
+// callback before open_file (raw_decoder.cpp:195-197, same pattern as
+// decodeRaw). This restores the old C API's JPEG-EXIF behavior on the custom
+// path. Foveon / non-CFA sensors throw from decodeRawMosaic (raw_image==nullptr,
+// raw_decoder.cpp:213) and propagate to the entry-point catch -> RA_ERR_UNKNOWN
+// (accepted per user direction — these are rare and unsupported on purpose).
+rawalchemy::ImageBuffer decodeImageWithCustomPipeline(
+    const std::string& inputPath,
+    rawalchemy::ExifCollector* exifCollector) {
+    auto mosaic = rawalchemy::decodeRawMosaic(inputPath, exifCollector);
+
+    rawalchemy::subtractBlackLevel(mosaic);
+    rawalchemy::fixHotPixels(mosaic);
+    rawalchemy::highlightInpaintOpposed(mosaic);
+
+    rawalchemy::ImageBuffer img = (mosaic.filters == 9)
+        ? rawalchemy::xtransMarkesteijnDemosaic(mosaic)
+        : rawalchemy::rcdDemosaic(mosaic);
+
+    // WB multiply (green-anchored) on demosaiced RGB.
+    rawalchemy::applyWhiteBalance(img, mosaic.cam_mul);
+    // Orientation flip (post-demosaic, on RGB).
+    rawalchemy::applyFlip(img, mosaic.flip);
+
+    // Camera -> ProPhoto RGB matrix (float64-derived, cast here to float[3][3]).
+    auto M = rawalchemy::cameraToProphotoMatrix(mosaic);
+    float Mf[3][3] = {
+        {M[0][0], M[0][1], M[0][2]},
+        {M[1][0], M[1][1], M[1][2]},
+        {M[2][0], M[2][1], M[2][2]},
+    };
+    rawalchemy::applyColorMatrix(img, Mf);
+
+    // Clip to [0,1] — same call main.cpp uses after the matrix
+    // (main.cpp:441-443: explicit loop, NOT ImageBuffer::clamp()).
+    for (auto& v : img.data) {
+        v = std::max(0.0f, std::min(1.0f, v));
+    }
+    return img;
+}
+
 } // anonymous namespace
 
 // ----------------------------------------------------------------
@@ -341,8 +395,11 @@ RA_API RaResult RA_CALL raProcessFile(
         rawalchemy::ExifCollector* exifCollector = isJpeg
             ? rawalchemy::createExifCollector() : nullptr;
 
-        // Decode (with optional EXIF collection)
-        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
+        // Decode + run the custom CPU demosaic pipeline (Phases 1-5).
+        // Returns a ProPhoto RGB linear ImageBuffer consumed unchanged by
+        // runPipeline below. exifCollector is passed through so JPEG output
+        // retains EXIF.
+        auto img = decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
 
         // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
@@ -412,7 +469,11 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         rawalchemy::ExifCollector* exifCollector = isJpeg
             ? rawalchemy::createExifCollector() : nullptr;
 
-        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
+        // Decode + run the custom CPU demosaic pipeline (Phases 1-5).
+        // Returns a ProPhoto RGB linear ImageBuffer consumed unchanged by
+        // runPipeline below. exifCollector is passed through so JPEG output
+        // retains EXIF.
+        auto img = decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
         rawalchemy::LUT3D lut;
@@ -484,8 +545,9 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     clearError();
 
     try {
-        // Decode
-        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        // Decode + run the custom CPU demosaic pipeline (Phases 1-5).
+        // No EXIF collector for the buffer entry point.
+        auto img = decodeImageWithCustomPipeline(std::string(inputPath), nullptr);
 
         // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
