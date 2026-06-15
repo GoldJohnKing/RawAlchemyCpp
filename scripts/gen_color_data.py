@@ -232,13 +232,17 @@ def generate_cpp_header(matrices, output_path):
     lines.append("    }")
 
     # Arri LogC4
+    # NOTE: a/b/c/s_val/t use std::pow/std::log which are NOT constexpr, so the
+    # variables must be `static const` (computed once, thread-safe) rather than
+    # `constexpr` — clang/libc++ (Android NDK) correctly rejects constexpr with
+    # non-constexpr functions; g++ accepts it as a non-conforming extension.
     lines.append("    case LogCurve::Arri_LogC4: {")
-    lines.append("        // ARRI LogC4")
-    lines.append("        constexpr float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;")
-    lines.append("        constexpr float b = (1023.0f - 95.0f) / 1023.0f;")
-    lines.append("        constexpr float c = 95.0f / 1023.0f;")
-    lines.append("        constexpr float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);")
-    lines.append("        constexpr float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;")
+    lines.append("        // ARRI LogC4 (a/b/c/s/t derived; static const — see gen note)")
+    lines.append("        static const float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;")
+    lines.append("        static const float b = (1023.0f - 95.0f) / 1023.0f;")
+    lines.append("        static const float c = 95.0f / 1023.0f;")
+    lines.append("        static const float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);")
+    lines.append("        static const float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;")
     lines.append("        if (x >= t) return (std::log2(a * x + 64.0f) - 6.0f) / 14.0f * b + c;")
     lines.append("        return (x - t) / s_val;")
     lines.append("    }")

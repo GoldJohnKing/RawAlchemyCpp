@@ -218,12 +218,12 @@ inline float logEncode(float x, LogCurve curve) {
         return 5.367655f * x + 0.092809f;
     }
     case LogCurve::Arri_LogC4: {
-        // ARRI LogC4
-        constexpr float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;
-        constexpr float b = (1023.0f - 95.0f) / 1023.0f;
-        constexpr float c = 95.0f / 1023.0f;
-        constexpr float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);
-        constexpr float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;
+        // ARRI LogC4 (a/b/c/s/t derived; static const — see gen note)
+        static const float a = (std::pow(2.0f, 18.0f) - 16.0f) / 117.45f;
+        static const float b = (1023.0f - 95.0f) / 1023.0f;
+        static const float c = 95.0f / 1023.0f;
+        static const float s_val = (7.0f * std::log(2.0f) * std::pow(2.0f, 7.0f - 14.0f*c/b)) / (a * b);
+        static const float t = (std::pow(2.0f, 14.0f*(-c/b) + 6.0f) - 64.0f) / a;
         if (x >= t) return (std::log2(a * x + 64.0f) - 6.0f) / 14.0f * b + c;
         return (x - t) / s_val;
     }
