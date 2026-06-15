@@ -313,22 +313,37 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
 }
 
 // ----------------------------------------------------------------
-//  Custom CPU demosaic pipeline (Phases 1-5) — direct, no fallback
+//  Custom CPU demosaic pipeline (Phases 1-5) — with Foveon fallback
 // ----------------------------------------------------------------
 
-// Decode + run the custom CPU demosaic pipeline (Phases 1-5). Direct overwrite
-// of the original scheme: new pipeline ONLY, no dcraw fallback / probe dance.
+// Decode + run the custom CPU demosaic pipeline (Phases 1-5).
 //
 // The exifCollector is passed THROUGH to decodeRawMosaic, which wires the EXIF
 // callback before open_file (raw_decoder.cpp:195-197, same pattern as
-// decodeRaw). This restores the old C API's JPEG-EXIF behavior on the custom
-// path. Foveon / non-CFA sensors throw from decodeRawMosaic (raw_image==nullptr,
-// raw_decoder.cpp:213) and propagate to the entry-point catch -> RA_ERR_UNKNOWN
-// (accepted per user direction — these are rare and unsupported on purpose).
+// decodeRaw), restoring the old C API's JPEG-EXIF behavior on the custom path.
+//
+// Fallback: Foveon / non-CFA sensors (and any decodeRawMosaic open/unpack
+// failure) throw std::runtime_error — on that single case, fall back to the
+// LibRaw dcraw path (which handles non-CFA sensors natively) instead of
+// surfacing RA_ERR_UNKNOWN. The catch is scoped to decodeRawMosaic ONLY, so
+// any throw from the later custom-path steps (black/hot-pixel/highlight/
+// demosaic/matrix) still propagates as a real error.
+//
+// EXIF on fallback: decodeRawMosaic runs open_file (firing the EXIF callback)
+// BEFORE the raw_image==nullptr check, so on the fallback path the collector
+// may already hold tags. clearExifCollector() resets it so dcraw re-collects
+// cleanly, avoiding duplicate tags in the JPEG APP1 blob.
 rawalchemy::ImageBuffer decodeImageWithCustomPipeline(
     const std::string& inputPath,
     rawalchemy::ExifCollector* exifCollector) {
-    auto mosaic = rawalchemy::decodeRawMosaic(inputPath, exifCollector);
+    rawalchemy::RawMosaic mosaic;
+    try {
+        mosaic = rawalchemy::decodeRawMosaic(inputPath, exifCollector);
+    } catch (const std::runtime_error&) {
+        // Foveon / non-CFA / probe failure -> LibRaw dcraw fallback.
+        if (exifCollector) rawalchemy::clearExifCollector(exifCollector);
+        return rawalchemy::decodeRaw(inputPath, rawalchemy::DecodeParams{}, exifCollector);
+    }
 
     rawalchemy::subtractBlackLevel(mosaic);
     rawalchemy::fixHotPixels(mosaic);

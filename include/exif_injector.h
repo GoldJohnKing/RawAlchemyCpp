@@ -36,6 +36,17 @@ ExifCollector* createExifCollector();
 void destroyExifCollector(ExifCollector* collector);
 
 /**
+ * @brief Reset an ExifCollector to its initial empty state.
+ *
+ * Used when a decode probe has already fired the LibRaw EXIF callback (during
+ * open_file) but a fallback path must re-decode and re-collect from scratch —
+ * e.g. Foveon / non-CFA sensors: decodeRawMosaic runs open_file (collecting
+ * EXIF) before discovering raw_image==nullptr and throwing; the dcraw fallback
+ * then needs a clean collector to avoid duplicate tags in the JPEG APP1 blob.
+ */
+void clearExifCollector(ExifCollector* collector);
+
+/**
  * @brief Get the LibRaw exif_parser_callback function pointer.
  *
  * Pass this + the collector to LibRaw::set_exifparser_handler().
