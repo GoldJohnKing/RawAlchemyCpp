@@ -39,8 +39,11 @@ void subtractBlackLevel(RawMosaic& m);
  * plane: 3x3 median filter (BORDER_REPLICATE), compute |plane - median|,
  * flag pixels where diff > threshold * std(diff), replace with median.
  *
- * Hand-rolled median (no OpenCV). OpenMP-parallelized across the
- * patSize x patSize plane offsets.
+ * Hand-rolled median (no OpenCV). Parallelized over the plane's PIXELS (the
+ * median is the hot spot) — the patSize x patSize CFA offset grid is the
+ * serial outer loop, since Bayer has only 4 offsets and would underthread a
+ * collapse(2) over offsets. Scratch buffers (plane/median) are reused across
+ * CFA planes (resized, not reallocated).
  *
  * @param m          Mosaic (modified in-place; assumed already normalized).
  * @param threshold  Outlier threshold in units of std (default 4.0, matches Python).

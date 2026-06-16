@@ -31,7 +31,6 @@ struct RawMosaic {
     unsigned filters = 0;           ///< LibRaw CFA code (==9 => X-Trans)
     char xtrans[6][6] = {{0}};      ///< X-Trans pattern (only meaningful if filters==9)
     int colors = 3;                 ///< Sensor color count (3 for typical RGBG Bayer)
-    bool is_foveon = false;         ///< True for Foveon / non-CFA sensors (rejected in decode)
 
     // Per-channel black (collapsed) + white point + WB + matrix.
     // cblack holds the EFFECTIVE per-channel black = (imgdata.color.black +
@@ -43,7 +42,6 @@ struct RawMosaic {
     float cam_mul[4] = {1, 1, 1, 1};///< Camera WB coefficients
     double cam_xyz[4][3] = {{0}};   ///< XYZ -> camera matrix
     int flip = 0;                   ///< Orientation (applied LATER, post-demosaic; just stored)
-    bool has_2d_darkframe = false;  ///< True if cblack[4]/[5] nonzero in source (2D frame NOT applied in Phase 1)
 };
 
 /**

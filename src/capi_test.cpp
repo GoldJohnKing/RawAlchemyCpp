@@ -1,13 +1,18 @@
 /**
  * @file capi_test.cpp
- * @brief End-to-end test for the C API (raProcessFileWithLUT).
+ * @brief End-to-end test for the C API — exercises all 3 one-shot entry points.
  *
- * Exercises the C API one-shot path on a real RAW file with a real log space
- * (e.g. F-Log2), writes the output via raProcessFileWithLUT (format auto-
- * detected from the output path extension: .tif/.tiff -> 16-bit TIFF,
- * .jpg/.jpeg -> JPEG), then reads the dimensions back to confirm a well-formed
- * file. Proves the C API now routes through the custom CPU demosaic pipeline
- * (Phases 1-5), producing the SAME output as `raw_alchemy_cli --demosaic auto`.
+ * Calls raProcessFileWithLUT (path/table-based LUT), raProcessFile (path-based
+ * LUT, same pipeline minus the LUT-table params), and raProcessToBuffer
+ * (returns a buffer handle instead of writing a file). All three share
+ * runPipelineImpl internally, so this is API-surface coverage: every one-shot
+ * entry point must return RA_OK and produce sane output.
+ *
+ * The PRIMARY output (raProcessFileWithLUT) is written to argv[2] unchanged so
+ * Test/cross_validate_capi.py's per-channel-means + EXIF regression checks
+ * keep working. raProcessFile writes a sibling file (suffix before the
+ * extension) whose read-back dimensions must match the primary; raProcessToBuffer
+ * returns a handle whose W/H must match and which must be destroyed.
  *
  * The JPEG path also exercises the EXIF pipeline (exifCollector is passed
  * through decodeRawMosaic -> callback fires during open_file -> EXIF APP1 is
@@ -105,6 +110,27 @@ bool readJpegDims(const char* path, uint32_t& w, uint32_t& h) {
     }
 }
 
+// Build a sibling output path by inserting `suffix` before the extension, so
+// the format-determining extension is preserved (e.g. "/o/out.tiff" + ".pf"
+// -> "/o/out.pf.tiff"). Falls back to appending if no extension is present.
+std::string makeSiblingPath(const std::string& base, const std::string& suffix) {
+    auto slash = base.find_last_of("/\\");
+    auto dot = base.find_last_of('.');
+    if (dot == std::string::npos || (slash != std::string::npos && dot < slash)) {
+        return base + suffix;
+    }
+    return base.substr(0, dot) + suffix + base.substr(dot);
+}
+
+// Read back the dimensions of a written file (TIFF via libtiff, JPEG via SOF
+// scan). Format is picked from the path extension. Returns true on success.
+bool readBackDims(const std::string& path, uint32_t& w, uint32_t& h) {
+    if (isJpegPath(path)) {
+        return readJpegDims(path.c_str(), w, h);
+    }
+    return readTiffDims(path.c_str(), w, h);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -120,15 +146,16 @@ int main(int argc, char** argv) {
     const char* logSpace = argv[3];
     const std::string outStr(outputPath);
 
+    // ============================================================
+    // 1) raProcessFileWithLUT — PRIMARY output (written to argv[2]).
+    //    cross_validate_capi.py reads this back for means + EXIF checks.
+    // ============================================================
     printf("[capi_test] raProcessFileWithLUT('%s' -> '%s', log='%s')\n",
            inputPath, outputPath, logSpace);
 
-    // Run the C API one-shot path: decode (custom demosaic pipeline) ->
-    // exposure -> sat/contrast -> log -> (no LUT) -> output. No LUT (NULL
-    // table), auto exposure (evOffset=0 = matrix metering, no manual bias),
-    // no lens correction. Output format is auto-detected from the extension
-    // by raProcessFileWithLUT. (Signature after main's c7ef366: useAutoExposure
-    // removed, manualEv renamed to evOffset.)
+    // No LUT (NULL table), auto exposure (evOffset=0 = matrix metering, no
+    // manual bias), no lens correction. Output format is auto-detected from
+    // the extension by raProcessFileWithLUT.
     RaResult res = raProcessFileWithLUT(
         inputPath,
         outputPath,
@@ -153,16 +180,92 @@ int main(int argc, char** argv) {
     // Read back dimensions (format-aware) to confirm a well-formed output and
     // surface the image size to the cross-validation script.
     uint32_t W = 0, H = 0;
-    bool ok;
-    if (isJpegPath(outStr)) {
-        ok = readJpegDims(outputPath, W, H);
-    } else {
-        ok = readTiffDims(outputPath, W, H);
-    }
-    if (!ok) {
+    if (!readBackDims(outStr, W, H)) {
         fprintf(stderr,
-                "[capi_test] output written, but dimension read-back failed: %s\n",
+                "[capi_test] primary output written, but dimension read-back failed: %s\n",
                 outputPath);
+        return 1;
+    }
+
+    // ============================================================
+    // 2) raProcessFile — path-based LUT entry point (same pipeline,
+    //    NULL lutPath). Writes a sibling file; dims must match primary.
+    // ============================================================
+    const std::string pfPath = makeSiblingPath(outStr, ".pf");
+    printf("[capi_test] raProcessFile('%s' -> '%s', log='%s')\n",
+           inputPath, pfPath.c_str(), logSpace);
+
+    res = raProcessFile(
+        inputPath,
+        pfPath.c_str(),
+        logSpace,
+        /*lutPath*/ nullptr,
+        /*metering*/ "matrix",
+        /*evOffset*/ 0.0f,
+        /*jpegQuality*/ 90,
+        /*enableLensCorrection*/ 0,
+        /*customLensfunDb*/ nullptr);
+
+    if (res != RA_OK) {
+        const char* err = raGetLastError();
+        fprintf(stderr, "[capi_test] raProcessFile failed: %d (%s)\n",
+                static_cast<int>(res), err ? err : "(no error message)");
+        return 1;
+    }
+
+    uint32_t pfW = 0, pfH = 0;
+    if (!readBackDims(pfPath, pfW, pfH)) {
+        fprintf(stderr,
+                "[capi_test] raProcessFile output written, but dimension read-back failed: %s\n",
+                pfPath.c_str());
+        return 1;
+    }
+    if (pfW != W || pfH != H) {
+        fprintf(stderr,
+                "[capi_test] raProcessFile dims %ux%u != primary %ux%u\n",
+                pfW, pfH, W, H);
+        return 1;
+    }
+
+    // ============================================================
+    // 3) raProcessToBuffer — returns a buffer handle (no file output).
+    //    Handle dims must match the primary; caller must destroy.
+    // ============================================================
+    printf("[capi_test] raProcessToBuffer('%s', log='%s')\n",
+           inputPath, logSpace);
+
+    RaImageBuffer buf = nullptr;
+    res = raProcessToBuffer(
+        inputPath,
+        logSpace,
+        /*lutPath*/ nullptr,
+        /*metering*/ "matrix",
+        /*evOffset*/ 0.0f,
+        /*enableLensCorrection*/ 0,
+        /*customLensfunDb*/ nullptr,
+        &buf);
+
+    if (res != RA_OK) {
+        const char* err = raGetLastError();
+        fprintf(stderr, "[capi_test] raProcessToBuffer failed: %d (%s)\n",
+                static_cast<int>(res), err ? err : "(no error message)");
+        return 1;
+    }
+    const int bufW = raImageGetWidth(buf);
+    const int bufH = raImageGetHeight(buf);
+    const int bufBytes = raImageGetDataSizeBytes(buf);
+    raImageBufferDestroy(buf);
+
+    if (static_cast<uint32_t>(bufW) != W || static_cast<uint32_t>(bufH) != H) {
+        fprintf(stderr,
+                "[capi_test] raProcessToBuffer dims %dx%d != primary %ux%u\n",
+                bufW, bufH, W, H);
+        return 1;
+    }
+    if (bufBytes != static_cast<int>(W) * static_cast<int>(H) * 3 * 4) {
+        fprintf(stderr,
+                "[capi_test] raProcessToBuffer data size %d != expected %d\n",
+                bufBytes, static_cast<int>(W) * static_cast<int>(H) * 3 * 4);
         return 1;
     }
 

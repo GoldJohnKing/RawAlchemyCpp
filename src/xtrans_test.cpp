@@ -8,7 +8,7 @@
  *                        resulting camera-RGB ImageBuffer (H*W*3 float32,
  *                        RGB interleaved) to <path>. Prints "H W" to stdout.
  *                        Pattern type via argv[2]: "smooth" (default),
- *                        "edge-h", "edge-v", "edge-d", "zoneplate".
+ *                        "edge-h", "edge-v", "edge-d".
  *                        Size via argv[3] (default 300). Used by Test A/B.
  *
  *   2. --allhex          Print the allhex_dr[72] / allhex_dc[72] / sgrow /
@@ -33,7 +33,6 @@
 #include "demosaic.h"
 #include "raw_mosaic.h"
 
-#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -132,23 +131,6 @@ void buildEdgeD(const rawalchemy::RawMosaic& m, float* truth) {
     for (int row = 0; row < H; ++row) {
         for (int col = 0; col < W; ++col) {
             const float v = ((row + col) < thresh) ? bright : dark;
-            float* px = truth + (static_cast<size_t>(row) * W + col) * 3;
-            px[0] = v; px[1] = v; px[2] = v;
-        }
-    }
-}
-
-// Zone plate: cos(f * r^2) — high-frequency chirp. Stresses directional
-// interpolation across many frequencies. We use a moderate frequency.
-void buildZoneplate(const rawalchemy::RawMosaic& m, float* truth) {
-    const int W = m.width, H = m.height;
-    const float cx = W * 0.5f, cy = H * 0.5f;
-    const float f = 0.0008f;
-    for (int row = 0; row < H; ++row) {
-        for (int col = 0; col < W; ++col) {
-            const float dx = col - cx, dy = row - cy;
-            const float r2 = dx * dx + dy * dy;
-            const float v = 0.5f + 0.45f * std::cos(f * r2);
             float* px = truth + (static_cast<size_t>(row) * W + col) * 3;
             px[0] = v; px[1] = v; px[2] = v;
         }
@@ -263,10 +245,9 @@ int main(int argc, char* argv[]) {
     else if (pattern == "edge-h")     buildEdgeH(m, truth.data());
     else if (pattern == "edge-v")     buildEdgeV(m, truth.data());
     else if (pattern == "edge-d")     buildEdgeD(m, truth.data());
-    else if (pattern == "zoneplate")  buildZoneplate(m, truth.data());
     else {
         std::fprintf(stderr, "Unknown pattern '%s' (use: smooth, edge-h, "
-                             "edge-v, edge-d, zoneplate)\n", pattern.c_str());
+                             "edge-v, edge-d)\n", pattern.c_str());
         return 1;
     }
 

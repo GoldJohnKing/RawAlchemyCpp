@@ -15,6 +15,8 @@
 
 #include "common.h"
 
+#include <array>
+
 namespace rawalchemy {
 
 /**
@@ -58,11 +60,12 @@ void applyFlip(ImageBuffer& rgb, int flip);
  *
  * Standard row-major 3x3 multiply: out[i] = sum_j M[i][j] * in[j]. Used to
  * apply the camera -> ProPhoto RGB matrix derived by
- * cameraToProphotoMatrix(). OpenMP-parallelized across pixels.
+ * cameraToProphotoMatrix() (which returns std::array<std::array<float,3>,3>).
+ * OpenMP-parallelized across pixels.
  *
  * @param rgb  Image buffer (modified in-place).
  * @param M    Row-major 3x3 matrix (M[i][j]).
  */
-void applyColorMatrix(ImageBuffer& rgb, const float M[3][3]);
+void applyColorMatrix(ImageBuffer& rgb, const std::array<std::array<float, 3>, 3>& M);
 
 } // namespace rawalchemy

@@ -64,7 +64,9 @@ void subtractBlackLevel(RawMosaic& m) {
 }
 
 // ---- Hand-rolled 3x3 median (BORDER_REPLICATE) ----
-// Returns the median of up to 9 floats; uses std::nth_element.
+// Returns the median of up to 9 floats; uses std::nth_element. The scratch
+// buffer is caller-supplied so the parallel per-pixel loop can keep one on
+// each thread's stack.
 static inline float median3x3(const float* plane, int W, int H, int y, int x,
                                 float* scratch) {
     int n = 0;
@@ -93,6 +95,19 @@ static inline float median3x3(const float* plane, int W, int H, int y, int x,
 //       std    = max(np.std(diff), 1e-6)
 //       hot    = diff > threshold * std
 //       plane[hot] = med[hot]
+//
+// Parallelization: each CFA plane is processed with the per-pixel median +
+// diff/std + hot-replace as three separate #pragma omp parallel for loops.
+// Bayer has only 4 CFA offsets (patSize=2 -> 2x2) and X-Trans has 36
+// (patSize=6 -> 6x6); parallelizing across the CFA offset grid would
+// underutilize threads on Bayer, so the pixel dimension (the median hot
+// spot) is the parallel axis instead. The median is per-pixel independent;
+// the diff reduction uses an OpenMP reduction clause; the hot-replace is
+// per-pixel independent.
+//
+// Scratch reuse (L15): `plane`/`med` are declared once outside the CFA
+// offset loop and resized per plane (no realloc after the first/largest
+// plane), avoiding the 2*patSize*patSize allocations per call.
 void fixHotPixels(RawMosaic& m, float threshold) {
     const int patSize = (m.filters == 9) ? 6 : 2;
     const int W = m.width;
@@ -102,9 +117,10 @@ void fixHotPixels(RawMosaic& m, float threshold) {
     //   planeDims: planeH = ceil((H - br) / patSize), planeW = ceil((W - bc) / patSize)
     // Operate on the mosaic in-place by indexing through the strided subsample.
 
-    #ifdef RA_USE_OPENMP
-    #pragma omp parallel for collapse(2) schedule(static)
-    #endif
+    // Reusable scratch buffers — resized per plane, never reallocated once the
+    // high-water mark is reached.
+    std::vector<float> plane, med;
+
     for (int br = 0; br < patSize; ++br) {
         for (int bc = 0; bc < patSize; ++bc) {
             // Plane dimensions (subsampled grid).
@@ -112,12 +128,14 @@ void fixHotPixels(RawMosaic& m, float threshold) {
             const int planeW = (W - bc + patSize - 1) / patSize;
             if (planeH <= 0 || planeW <= 0) continue;
 
+            const size_t planeN = static_cast<size_t>(planeH) * planeW;
+            const int total = static_cast<int>(planeN);
+            plane.resize(planeN);
+            med.resize(planeN);
+
             // Pull the plane into a contiguous buffer for cache-friendly
             // median filtering, then write back. This matches the Python
             // semantic of `plane = raw_norm[r::pat_size, c::pat_size]`.
-            std::vector<float> plane(static_cast<size_t>(planeH) * planeW);
-            std::vector<float> med(static_cast<size_t>(planeH) * planeW);
-
             for (int py = 0; py < planeH; ++py) {
                 const int y = br + py * patSize;
                 const float* srcRow = m.data.data() + static_cast<size_t>(y) * W;
@@ -128,24 +146,30 @@ void fixHotPixels(RawMosaic& m, float threshold) {
                 }
             }
 
-            // 3x3 median per pixel, BORDER_REPLICATE.
-            float scratch[9];
-            for (int py = 0; py < planeH; ++py) {
-                float* mRow = med.data() + static_cast<size_t>(py) * planeW;
-                for (int px = 0; px < planeW; ++px) {
-                    mRow[px] = median3x3(plane.data(), planeW, planeH, py, px, scratch);
-                }
+            // 3x3 median per pixel, BORDER_REPLICATE. Each pixel is
+            // independent -> parallelize over the plane (the hot spot).
+            // scratch lives on each thread's stack.
+            const float* planeData = plane.data();
+            float* medData = med.data();
+            #pragma omp parallel for schedule(static)
+            for (int idx = 0; idx < total; ++idx) {
+                const int py = idx / planeW;
+                const int px = idx - py * planeW;
+                float scratch[9];
+                medData[idx] = median3x3(planeData, planeW, planeH, py, px, scratch);
             }
 
             // diff = abs(plane - med); std = max(stddev(diff), 1e-6).
             // Python uses np.std(diff) which is population std (ddof=0).
+            // Reuse plane[] to store |diff| (avoids another alloc). The two
+            // accumulators are reduced across threads.
+            float* diffData = plane.data();
             double sum = 0.0, sumSq = 0.0;
-            const size_t planeN = static_cast<size_t>(planeH) * planeW;
-            // Reuse plane[] to store |diff| (avoids another alloc).
-            for (size_t i = 0; i < planeN; ++i) {
-                const float d = std::fabs(plane[i] - med[i]);
-                plane[i] = d;
-                sum += d;
+            #pragma omp parallel for schedule(static) reduction(+:sum,sumSq)
+            for (int idx = 0; idx < total; ++idx) {
+                const float d = std::fabs(diffData[idx] - medData[idx]);
+                diffData[idx] = d;
+                sum += static_cast<double>(d);
                 sumSq += static_cast<double>(d) * d;
             }
             const double mean = sum / static_cast<double>(planeN);
@@ -158,11 +182,12 @@ void fixHotPixels(RawMosaic& m, float threshold) {
             // hot = diff > cutoff; replace hot pixels in the mosaic with median.
             // Non-hot pixels keep their existing mosaic value (untouched in
             // m.data). plane[] currently holds |diff|; med[] holds the median.
+            #pragma omp parallel for schedule(static)
             for (int py = 0; py < planeH; ++py) {
                 const int y = br + py * patSize;
                 float* dstRow = m.data.data() + static_cast<size_t>(y) * W;
-                const float* medRow  = med.data()  + static_cast<size_t>(py) * planeW;
-                const float* diffRow = plane.data() + static_cast<size_t>(py) * planeW;
+                const float* medRow  = medData + static_cast<size_t>(py) * planeW;
+                const float* diffRow = diffData + static_cast<size_t>(py) * planeW;
                 for (int px = 0; px < planeW; ++px) {
                     if (diffRow[px] > cutoff) {
                         dstRow[bc + px * patSize] = medRow[px];

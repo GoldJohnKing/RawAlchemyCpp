@@ -20,11 +20,8 @@ Two-tier validation:
   If the Lensfun DB lacks the camera/lens (correction is a no-op), we report
   that and rely on the synthetic test (PRIMARY).
 
-Legacy mode: with two TIFF args, runs the original before/after comparison.
-
 Usage:
   python3 cross_validate_lens.py                          # synthetic + smoke
-  python3 cross_validate_lens.py <off.tif> <on.tif>       # legacy comparison
 
 Run with the Raw-Alchemy venv:
     /mnt/d/GitRepos/Raw-Alchemy/.venv/bin/python \\
@@ -299,36 +296,7 @@ def run_smoke_test():
 
 
 # ============================================================
-#           LEGACY: before/after TIFF comparison
-# ============================================================
-
-def run_legacy_compare(off_path, on_path):
-    import math
-    print("=== Legacy Lens Correction Comparison ===\n")
-    w1, h1, px_off = read_tiff_pixels(off_path)
-    w2, h2, px_on = read_tiff_pixels(on_path)
-    assert w1 == w2 and h1 == h2, f"Size mismatch: {w1}x{h1} vs {w2}x{h2}"
-    W, H = w1, h1
-
-    total = W * H
-    diff_sq_sum = 0.0
-    for i in range(len(px_off)):
-        d = abs(px_off[i] - px_on[i])
-        diff_sq_sum += d * d
-    mse = diff_sq_sum / len(px_off)
-    psnr = 10.0 * math.log10((65535.0 ** 2) / mse) if mse > 0 else float("inf")
-    print(f"  Image: {W} x {H}, PSNR: {psnr:.2f} dB")
-    ok = 15.0 < psnr < 50.0
-    print(f"  Legacy: {'PASS' if ok else 'FAIL'} (15 < PSNR < 50)")
-    return ok
-
-
-# ============================================================
 def main():
-    if len(sys.argv) >= 3:
-        ok = run_legacy_compare(sys.argv[1], sys.argv[2])
-        sys.exit(0 if ok else 1)
-
     ok_primary = run_synthetic_test()
     ok_secondary = run_smoke_test() if ok_primary else False
 

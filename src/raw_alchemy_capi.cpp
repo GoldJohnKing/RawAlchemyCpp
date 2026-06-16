@@ -52,6 +52,20 @@ void clearError() {
     g_lastError.clear();
 }
 
+// Probe sensor type via the cheap metadata-only open, then route: non-CFA
+// (Foveon / 4-color / 2D-darkframe) sensors to decodeRaw()/dcraw; everything
+// else to the custom RCD/Markesteijn pipeline. EXIF is collected exactly once
+// by the chosen decode path. Shared across all three one-shot entry points
+// (raProcessFile, raProcessFileWithLUT, raProcessToBuffer).
+rawalchemy::ImageBuffer decodeWithFallback(
+    const rawalchemy::CameraMetadata& meta,
+    const std::string& path,
+    rawalchemy::ExifCollector* ec) {
+    return meta.isNonCfa
+        ? rawalchemy::decodeRaw(path, rawalchemy::DecodeParams{}, ec)
+        : rawalchemy::decodeImageWithCustomPipeline(path, ec);
+}
+
 RaResult catchExceptions(const char* context) {
     try {
         throw;
@@ -362,9 +376,7 @@ RA_API RaResult RA_CALL raProcessFile(
         // decodeRaw/dcraw; everything else to the custom pipeline. EXIF is
         // collected exactly once, by the chosen decode path.
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
-        auto img = meta.isNonCfa
-            ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, exifCollector)
-            : rawalchemy::decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
+        auto img = decodeWithFallback(meta, std::string(inputPath), exifCollector);
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,
@@ -433,9 +445,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
 
         // Probe sensor type first; route non-CFA/Foveon to dcraw, else custom.
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
-        auto img = meta.isNonCfa
-            ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, exifCollector)
-            : rawalchemy::decodeImageWithCustomPipeline(std::string(inputPath), exifCollector);
+        auto img = decodeWithFallback(meta, std::string(inputPath), exifCollector);
 
         rawalchemy::LUT3D lut;
         const rawalchemy::LUT3D* lutPtr = nullptr;
@@ -505,9 +515,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         // Probe sensor type first; route non-CFA/Foveon to dcraw, else custom.
         // No EXIF collector for the buffer entry point.
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
-        auto img = meta.isNonCfa
-            ? rawalchemy::decodeRaw(std::string(inputPath), rawalchemy::DecodeParams{}, nullptr)
-            : rawalchemy::decodeImageWithCustomPipeline(std::string(inputPath), nullptr);
+        auto img = decodeWithFallback(meta, std::string(inputPath), nullptr);
 
         // Run pipeline
         RaResult res = runPipeline(img, meta, logSpace, lutPath, metering,

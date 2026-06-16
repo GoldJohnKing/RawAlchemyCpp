@@ -342,7 +342,6 @@ RawMosaic decodeRawMosaic(const std::string& rawPath, ExifCollector* exifCollect
     m.height  = visH;
     m.filters = idata.filters;
     m.colors  = idata.colors;
-    m.is_foveon = (idata.is_foveon != 0);
     std::memcpy(m.xtrans, idata.xtrans, sizeof(m.xtrans));
 
     // --- Copy visible region as float ---
@@ -378,7 +377,8 @@ RawMosaic decodeRawMosaic(const std::string& rawPath, ExifCollector* exifCollect
     // NOTE: the 2D darkframe component (cblack[6..], dimensions cblack[4..5])
     // is NOT applied here — Phase 1 limitation. Rare medium-format / Sony
     // sensors with a true per-pixel darkframe must fall back to dcraw_process.
-    m.has_2d_darkframe = (color.cblack[4] != 0 || color.cblack[5] != 0);
+    // (Sensor-type routing for the 2D-darkframe case lives in
+    // CameraMetadata::isNonCfa, computed independently in extractMetadata.)
     for (int c = 0; c < 4; ++c) {
         m.cblack[c] = static_cast<float>(color.black) +
                       static_cast<float>(color.cblack[c]);

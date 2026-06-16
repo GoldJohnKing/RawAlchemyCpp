@@ -29,12 +29,11 @@ void applyWhiteBalance(ImageBuffer& rgb, const float cam_mul[4]) {
     const size_t nPixels = rgb.pixelCount();
     float* data = rgb.ptr();
 
-    #ifdef RA_USE_OPENMP
+    // #pragma omp parallel for is a no-op (parsed & ignored) when OpenMP is
+    // disabled, so the same loop body serves both builds. OpenMP requires a
+    // signed loop index.
     #pragma omp parallel for schedule(static, 8192)
     for (int i = 0; i < static_cast<int>(nPixels); ++i) {
-    #else
-    for (size_t i = 0; i < nPixels; ++i) {
-    #endif
         float* p = data + i * 3;
         p[0] *= rGain;
         // Green channel untouched (it's the WB anchor).
@@ -61,12 +60,8 @@ void applyFlip(ImageBuffer& rgb, int flip) {
         ImageBuffer out(W, H, C);
         const float* src = rgb.ptr();
         float* dst = out.ptr();
-        #ifdef RA_USE_OPENMP
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < H; ++i) {
-        #else
-        for (int i = 0; i < H; ++i) {
-        #endif
             const float* srcRow = src + static_cast<size_t>(H - 1 - i) * W * C;
             float* dstRow = dst + static_cast<size_t>(i) * W * C;
             for (int j = 0; j < W; ++j) {
@@ -86,12 +81,8 @@ void applyFlip(ImageBuffer& rgb, int flip) {
         float* dst = out.ptr();
         const int newH = W;   // new height = old width
         const int newW = H;   // new width  = old height
-        #ifdef RA_USE_OPENMP
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < newH; ++i) {
-        #else
-        for (int i = 0; i < newH; ++i) {
-        #endif
             float* dstRow = dst + static_cast<size_t>(i) * newW * C;
             for (int j = 0; j < newW; ++j) {
                 const float* sp = src + (static_cast<size_t>(j) * W +
@@ -111,12 +102,8 @@ void applyFlip(ImageBuffer& rgb, int flip) {
         float* dst = out.ptr();
         const int newH = W;
         const int newW = H;
-        #ifdef RA_USE_OPENMP
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < newH; ++i) {
-        #else
-        for (int i = 0; i < newH; ++i) {
-        #endif
             float* dstRow = dst + static_cast<size_t>(i) * newW * C;
             for (int j = 0; j < newW; ++j) {
                 const float* sp = src + (static_cast<size_t>(H - 1 - j) * W +
@@ -137,7 +124,7 @@ void applyFlip(ImageBuffer& rgb, int flip) {
 //                       Matrix apply
 //  3x3 color-matrix multiply, in-place. OpenMP across pixels.
 // ============================================================
-void applyColorMatrix(ImageBuffer& rgb, const float M[3][3]) {
+void applyColorMatrix(ImageBuffer& rgb, const std::array<std::array<float, 3>, 3>& M) {
     const float m00 = M[0][0], m01 = M[0][1], m02 = M[0][2];
     const float m10 = M[1][0], m11 = M[1][1], m12 = M[1][2];
     const float m20 = M[2][0], m21 = M[2][1], m22 = M[2][2];
@@ -145,12 +132,8 @@ void applyColorMatrix(ImageBuffer& rgb, const float M[3][3]) {
     const size_t nPixels = rgb.pixelCount();
     float* data = rgb.ptr();
 
-    #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static, 8192)
     for (int i = 0; i < static_cast<int>(nPixels); ++i) {
-    #else
-    for (size_t i = 0; i < nPixels; ++i) {
-    #endif
         float* p = data + i * 3;
         const float r = p[0], g = p[1], b = p[2];
         p[0] = r * m00 + g * m01 + b * m02;

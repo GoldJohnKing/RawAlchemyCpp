@@ -44,15 +44,11 @@ ImageBuffer decodeImageWithCustomPipeline(
     applyWhiteBalance(img, mosaic.cam_mul);
     applyFlip(img, mosaic.flip);
 
-    // Camera -> ProPhoto RGB matrix (float64-derived, cast to float[3][3] for
-    // applyColorMatrix — it takes const float[3][3], not std::array).
+    // Camera -> ProPhoto RGB matrix. cameraToProphotoMatrix() returns
+    // std::array<std::array<float,3>,3>, which applyColorMatrix now consumes
+    // directly (no float[3][3] cast needed).
     auto M = cameraToProphotoMatrix(mosaic);
-    float Mf[3][3] = {
-        {M[0][0], M[0][1], M[0][2]},
-        {M[1][0], M[1][1], M[1][2]},
-        {M[2][0], M[2][1], M[2][2]},
-    };
-    applyColorMatrix(img, Mf);
+    applyColorMatrix(img, M);
 
     // Clip to [0,1] — matches the Python reference (core.py) and the dcraw
     // path's uint16->float normalization. ImageBuffer::clamp() (common.h) is
