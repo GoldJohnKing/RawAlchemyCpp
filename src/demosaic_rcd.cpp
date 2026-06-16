@@ -15,6 +15,12 @@
  * standard Bayer filter codes only ever produce 0/1/2 so this is a safe
  * superset that also handles non-standard codes encoding G2 distinctly.
  *
+ * Intermediate planes (cfa, rgb0/1/2, VH_dir, lpf, p/q_diff, PQ_dir) use
+ * DemosaicPlane: F16 storage on ARM64 / F32 elsewhere. Arithmetic is always
+ * F32 — reads upcast via operator[], writes downcast via set(). Input
+ * RawMosaic::data and output ImageBuffer::data stay float32; conversion
+ * happens at the populate/write-output boundaries automatically.
+ *
  * Constants (demosaic.py:22-23): EPS=1e-5f, EPSSQ=1e-10f, border=4.
  */
 
@@ -44,6 +50,10 @@ template <typename T>
 static inline void freeVector(std::vector<T>& v) {
     std::vector<T>().swap(v);
 }
+// Overload for DemosaicPlane (intermediate planes use F16 storage on ARM64).
+static inline void freeVector(DemosaicPlane& p) {
+    p.clear();
+}
 
 // Green-position test: cfaColor returns 1 (G) or 3 (G2) for green sites.
 static inline bool isGreen(int color) { return color == 1 || color == 3; }
@@ -54,10 +64,10 @@ static inline bool isGreen(int color) { return color == 1 || color == 3; }
 // cfa[r,c] = max(0, bayer[r,c]); route into rgb0 (R) / rgb1 (G) / rgb2 (B)
 // by CFA color. Green sites (color 1 or 3) -> rgb1.
 static void rcdPopulate(const RawMosaic& m,
-                         std::vector<float>& cfa,
-                         std::vector<float>& rgb0,
-                         std::vector<float>& rgb1,
-                         std::vector<float>& rgb2) {
+                        DemosaicPlane& cfa,
+                        DemosaicPlane& rgb0,
+                        DemosaicPlane& rgb1,
+                        DemosaicPlane& rgb2) {
     const int W = m.width;
     const int H = m.height;
     const float* bayer = m.data.data();
@@ -69,14 +79,14 @@ static void rcdPopulate(const RawMosaic& m,
         for (int col = 0; col < W; ++col) {
             const size_t idx = static_cast<size_t>(row) * W + col;
             const float val = std::max(0.0f, bayer[idx]);
-            cfa[idx] = val;
+            cfa.set(idx, val);
             const int color = cfaColor(m, row, col);
             if (color == 0) {
-                rgb0[idx] = val;
+                rgb0.set(idx, val);
             } else if (isGreen(color)) {
-                rgb1[idx] = val;
+                rgb1.set(idx, val);
             } else {  // color == 2 (B)
-                rgb2[idx] = val;
+                rgb2.set(idx, val);
             }
         }
     }
@@ -87,12 +97,9 @@ static void rcdPopulate(const RawMosaic& m,
 // ============================================================
 // 9-tap vertical & horizontal high-pass over a 3-point neighborhood;
 // VH_dir = V_Stat / (V_Stat + H_Stat).
-static void rcdStep1(const std::vector<float>& cfa,
-                      std::vector<float>& VH_dir,
-                      int W, int H) {
-    const float* cf = cfa.data();
-    float* vh = VH_dir.data();
-
+static void rcdStep1(const DemosaicPlane& cfa,
+                     DemosaicPlane& VH_dir,
+                     int W, int H) {
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
     #endif
@@ -102,10 +109,10 @@ static void rcdStep1(const std::vector<float>& cfa,
             float V_Stat = kEpsSq;
             for (int dr = -1; dr <= 1; ++dr) {
                 const int r = row + dr;
-                const float v = (cf[(r - 3) * W + col] - cf[(r - 1) * W + col]
-                                 - cf[(r + 1) * W + col] + cf[(r + 3) * W + col]
-                                 - 3.0f * (cf[(r - 2) * W + col] + cf[(r + 2) * W + col])
-                                 + 6.0f * cf[r * W + col]);
+                const float v = (cfa[(r - 3) * W + col] - cfa[(r - 1) * W + col]
+                                 - cfa[(r + 1) * W + col] + cfa[(r + 3) * W + col]
+                                 - 3.0f * (cfa[(r - 2) * W + col] + cfa[(r + 2) * W + col])
+                                 + 6.0f * cfa[r * W + col]);
                 V_Stat += v * v;
             }
             V_Stat = std::max(kEpsSq, V_Stat);
@@ -114,15 +121,15 @@ static void rcdStep1(const std::vector<float>& cfa,
             float H_Stat = kEpsSq;
             for (int dc = -1; dc <= 1; ++dc) {
                 const int c = col + dc;
-                const float hv = (cf[row * W + (c - 3)] - cf[row * W + (c - 1)]
-                                  - cf[row * W + (c + 1)] + cf[row * W + (c + 3)]
-                                  - 3.0f * (cf[row * W + (c - 2)] + cf[row * W + (c + 2)])
-                                  + 6.0f * cf[row * W + c]);
+                const float hv = (cfa[row * W + (c - 3)] - cfa[row * W + (c - 1)]
+                                  - cfa[row * W + (c + 1)] + cfa[row * W + (c + 3)]
+                                  - 3.0f * (cfa[row * W + (c - 2)] + cfa[row * W + (c + 2)])
+                                  + 6.0f * cfa[row * W + c]);
                 H_Stat += hv * hv;
             }
             H_Stat = std::max(kEpsSq, H_Stat);
 
-            vh[row * W + col] = V_Stat / (V_Stat + H_Stat);
+            VH_dir.set(row * W + col, V_Stat / (V_Stat + H_Stat));
         }
     }
 }
@@ -133,12 +140,9 @@ static void rcdStep1(const std::vector<float>& cfa,
 // At non-green CFA positions: lpf = cfa + 0.5*(N+S+E+W) + 0.25*(4 diag).
 // Range is (2, h-2) x (2, w-2) — narrower border than other steps.
 static void rcdStep2(const RawMosaic& m,
-                      const std::vector<float>& cfa,
-                      std::vector<float>& lpf,
-                      int W, int H) {
-    const float* cf = cfa.data();
-    float* lp = lpf.data();
-
+                     const DemosaicPlane& cfa,
+                     DemosaicPlane& lpf,
+                     int W, int H) {
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
     #endif
@@ -146,11 +150,11 @@ static void rcdStep2(const RawMosaic& m,
         for (int col = 2; col < W - 2; ++col) {
             if (isGreen(cfaColor(m, row, col))) continue;  // only R/B sites
             const size_t i = static_cast<size_t>(row) * W + col;
-            lp[i] = (cf[i]
-                     + 0.5f * (cf[(row - 1) * W + col] + cf[(row + 1) * W + col]
-                               + cf[row * W + (col - 1)] + cf[row * W + (col + 1)])
-                     + 0.25f * (cf[(row - 1) * W + (col - 1)] + cf[(row - 1) * W + (col + 1)]
-                                + cf[(row + 1) * W + (col - 1)] + cf[(row + 1) * W + (col + 1)]));
+            lpf.set(i, (cfa[i]
+                     + 0.5f * (cfa[(row - 1) * W + col] + cfa[(row + 1) * W + col]
+                               + cfa[row * W + (col - 1)] + cfa[row * W + (col + 1)])
+                     + 0.25f * (cfa[(row - 1) * W + (col - 1)] + cfa[(row - 1) * W + (col + 1)]
+                                + cfa[(row + 1) * W + (col - 1)] + cfa[(row + 1) * W + (col + 1)])));
         }
     }
 }
@@ -161,16 +165,11 @@ static void rcdStep2(const RawMosaic& m,
 // Refined VH discrimination; cardinal gradients (±4); ratio-corrected
 // estimates; blend V_Est/H_Est by clipf(VH_Disc).
 static void rcdStep3(const RawMosaic& m,
-                      const std::vector<float>& cfa,
-                      const std::vector<float>& lpf,
-                      std::vector<float>& rgb1,
-                      const std::vector<float>& VH_dir,
-                      int W, int H) {
-    const float* cf = cfa.data();
-    const float* lp = lpf.data();
-    const float* vh = VH_dir.data();
-    float* g1 = rgb1.data();
-
+                     const DemosaicPlane& cfa,
+                     const DemosaicPlane& lpf,
+                     DemosaicPlane& rgb1,
+                     const DemosaicPlane& VH_dir,
+                     int W, int H) {
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
     #endif
@@ -180,44 +179,44 @@ static void rcdStep3(const RawMosaic& m,
 
             // Refined VH discrimination: pick central vs 4-corner-avg,
             // whichever is closer to 0.5.
-            const float VH_Central = vh[row * W + col];
-            const float VH_Neigh = 0.25f * (vh[(row - 1) * W + (col - 1)] + vh[(row - 1) * W + (col + 1)]
-                                            + vh[(row + 1) * W + (col - 1)] + vh[(row + 1) * W + (col + 1)]);
+            const float VH_Central = VH_dir[row * W + col];
+            const float VH_Neigh = 0.25f * (VH_dir[(row - 1) * W + (col - 1)] + VH_dir[(row - 1) * W + (col + 1)]
+                                            + VH_dir[(row + 1) * W + (col - 1)] + VH_dir[(row + 1) * W + (col + 1)]);
             const float VH_Disc = (std::fabs(0.5f - VH_Central) < std::fabs(0.5f - VH_Neigh))
                                   ? VH_Neigh : VH_Central;
 
-            const float cfai = cf[row * W + col];
+            const float cfai = cfa[row * W + col];
 
             // Cardinal gradients.
-            const float N_Grad = (kEps + std::fabs(cf[(row - 1) * W + col] - cf[(row + 1) * W + col])
-                                  + std::fabs(cfai - cf[(row - 2) * W + col])
-                                  + std::fabs(cf[(row - 1) * W + col] - cf[(row - 3) * W + col])
-                                  + std::fabs(cf[(row - 2) * W + col] - cf[(row - 4) * W + col]));
-            const float S_Grad = (kEps + std::fabs(cf[(row + 1) * W + col] - cf[(row - 1) * W + col])
-                                  + std::fabs(cfai - cf[(row + 2) * W + col])
-                                  + std::fabs(cf[(row + 1) * W + col] - cf[(row + 3) * W + col])
-                                  + std::fabs(cf[(row + 2) * W + col] - cf[(row + 4) * W + col]));
-            const float W_Grad = (kEps + std::fabs(cf[row * W + (col - 1)] - cf[row * W + (col + 1)])
-                                  + std::fabs(cfai - cf[row * W + (col - 2)])
-                                  + std::fabs(cf[row * W + (col - 1)] - cf[row * W + (col - 3)])
-                                  + std::fabs(cf[row * W + (col - 2)] - cf[row * W + (col - 4)]));
-            const float E_Grad = (kEps + std::fabs(cf[row * W + (col + 1)] - cf[row * W + (col - 1)])
-                                  + std::fabs(cfai - cf[row * W + (col + 2)])
-                                  + std::fabs(cf[row * W + (col + 1)] - cf[row * W + (col + 3)])
-                                  + std::fabs(cf[row * W + (col + 2)] - cf[row * W + (col + 4)]));
+            const float N_Grad = (kEps + std::fabs(cfa[(row - 1) * W + col] - cfa[(row + 1) * W + col])
+                                  + std::fabs(cfai - cfa[(row - 2) * W + col])
+                                  + std::fabs(cfa[(row - 1) * W + col] - cfa[(row - 3) * W + col])
+                                  + std::fabs(cfa[(row - 2) * W + col] - cfa[(row - 4) * W + col]));
+            const float S_Grad = (kEps + std::fabs(cfa[(row + 1) * W + col] - cfa[(row - 1) * W + col])
+                                  + std::fabs(cfai - cfa[(row + 2) * W + col])
+                                  + std::fabs(cfa[(row + 1) * W + col] - cfa[(row + 3) * W + col])
+                                  + std::fabs(cfa[(row + 2) * W + col] - cfa[(row + 4) * W + col]));
+            const float W_Grad = (kEps + std::fabs(cfa[row * W + (col - 1)] - cfa[row * W + (col + 1)])
+                                  + std::fabs(cfai - cfa[row * W + (col - 2)])
+                                  + std::fabs(cfa[row * W + (col - 1)] - cfa[row * W + (col - 3)])
+                                  + std::fabs(cfa[row * W + (col - 2)] - cfa[row * W + (col - 4)]));
+            const float E_Grad = (kEps + std::fabs(cfa[row * W + (col + 1)] - cfa[row * W + (col - 1)])
+                                  + std::fabs(cfai - cfa[row * W + (col + 2)])
+                                  + std::fabs(cfa[row * W + (col + 1)] - cfa[row * W + (col + 3)])
+                                  + std::fabs(cfa[row * W + (col + 2)] - cfa[row * W + (col + 4)]));
 
             // Ratio-corrected estimations.
-            const float lfpi = lp[row * W + col];
-            const float N_Est = cf[(row - 1) * W + col] * (2.0f * lfpi) / (kEps + lfpi + lp[(row - 2) * W + col]);
-            const float S_Est = cf[(row + 1) * W + col] * (2.0f * lfpi) / (kEps + lfpi + lp[(row + 2) * W + col]);
-            const float W_Est = cf[row * W + (col - 1)] * (2.0f * lfpi) / (kEps + lfpi + lp[row * W + (col - 2)]);
-            const float E_Est = cf[row * W + (col + 1)] * (2.0f * lfpi) / (kEps + lfpi + lp[row * W + (col + 2)]);
+            const float lfpi = lpf[row * W + col];
+            const float N_Est = cfa[(row - 1) * W + col] * (2.0f * lfpi) / (kEps + lfpi + lpf[(row - 2) * W + col]);
+            const float S_Est = cfa[(row + 1) * W + col] * (2.0f * lfpi) / (kEps + lfpi + lpf[(row + 2) * W + col]);
+            const float W_Est = cfa[row * W + (col - 1)] * (2.0f * lfpi) / (kEps + lfpi + lpf[row * W + (col - 2)]);
+            const float E_Est = cfa[row * W + (col + 1)] * (2.0f * lfpi) / (kEps + lfpi + lpf[row * W + (col + 2)]);
 
             const float V_Est = (S_Grad * N_Est + N_Grad * S_Est) / (N_Grad + S_Grad);
             const float H_Est = (W_Grad * E_Est + E_Grad * W_Est) / (E_Grad + W_Grad);
 
             const float d = clipf(VH_Disc);
-            g1[row * W + col] = d * (H_Est - V_Est) + V_Est;
+            rgb1.set(row * W + col, d * (H_Est - V_Est) + V_Est);
         }
     }
 }
@@ -239,41 +238,48 @@ static void rcdStep3(const RawMosaic& m,
 // R/G/B planes). This is applied after step3 (green interp) so step4_2 /
 // step4_3 read plausible values at border positions.
 static void fillBorderIntermediates(const RawMosaic& m,
-                                     std::vector<float>& rgb0,
-                                     std::vector<float>& rgb1,
-                                     std::vector<float>& rgb2) {
+                                    DemosaicPlane& rgb0,
+                                    DemosaicPlane& rgb1,
+                                    DemosaicPlane& rgb2) {
     const int W = m.width;
     const int H = m.height;
     const float* bayer = m.data.data();
 
+    // Per-pixel 3x3 bilinear estimate into rgb0/1/2 at a border position.
+    auto body = [&](int row, int col) {
+        float sums[3] = {0.0f, 0.0f, 0.0f};
+        float counts[3] = {0.0f, 0.0f, 0.0f};
+        for (int dy = -1; dy <= 1; ++dy) {
+            const int y = row + dy;
+            if (y < 0 || y >= H) continue;
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int x = col + dx;
+                if (x < 0 || x >= W) continue;
+                int c = cfaColor(m, y, x);
+                if (c == 3) c = 1;  // G2 -> G
+                sums[c] += std::max(0.0f, bayer[static_cast<size_t>(y) * W + x]);
+                counts[c] += 1.0f;
+            }
+        }
+
+        const size_t i = static_cast<size_t>(row) * W + col;
+        if (counts[0] > 0.0f) rgb0.set(i, sums[0] / counts[0]);
+        if (counts[1] > 0.0f) rgb1.set(i, sums[1] / counts[1]);
+        if (counts[2] > 0.0f) rgb2.set(i, sums[2] / counts[2]);
+    };
+
+    // Iterate ONLY the border ring (avoid ~H*W interior no-ops): full-width
+    // top/bottom bands plus the two side strips on interior rows. Identical
+    // pixel set to the previous full-HxW loop with the interior `continue`.
     #ifdef RA_USE_OPENMP
-    #pragma omp parallel for schedule(static) collapse(2)
+    #pragma omp parallel for schedule(static)
     #endif
     for (int row = 0; row < H; ++row) {
-        for (int col = 0; col < W; ++col) {
-            // Only process the 4-px border ring.
-            if (row >= kBorder && row < H - kBorder && col >= kBorder && col < W - kBorder)
-                continue;
-
-            float sums[3] = {0.0f, 0.0f, 0.0f};
-            float counts[3] = {0.0f, 0.0f, 0.0f};
-            for (int dy = -1; dy <= 1; ++dy) {
-                const int y = row + dy;
-                if (y < 0 || y >= H) continue;
-                for (int dx = -1; dx <= 1; ++dx) {
-                    const int x = col + dx;
-                    if (x < 0 || x >= W) continue;
-                    int c = cfaColor(m, y, x);
-                    if (c == 3) c = 1;  // G2 -> G
-                    sums[c] += std::max(0.0f, bayer[static_cast<size_t>(y) * W + x]);
-                    counts[c] += 1.0f;
-                }
-            }
-
-            const size_t i = static_cast<size_t>(row) * W + col;
-            if (counts[0] > 0.0f) rgb0[i] = sums[0] / counts[0];
-            if (counts[1] > 0.0f) rgb1[i] = sums[1] / counts[1];
-            if (counts[2] > 0.0f) rgb2[i] = sums[2] / counts[2];
+        if (row < kBorder || row >= H - kBorder) {
+            for (int col = 0; col < W; ++col) body(row, col);
+        } else {
+            for (int col = 0; col < kBorder; ++col) body(row, col);
+            for (int col = W - kBorder; col < W; ++col) body(row, col);
         }
     }
 }
@@ -282,30 +288,26 @@ static void fillBorderIntermediates(const RawMosaic& m,
 // Step 4.0: P/Q diagonal high-pass (demosaic.py:189-206)
 // ============================================================
 // fsquare of 9-tap diagonal high-pass. Range (3, h-3) x (3, w-3).
-static void rcdStep4_0(const std::vector<float>& cfa,
-                        std::vector<float>& p_diff,
-                        std::vector<float>& q_diff,
-                        int W, int H) {
-    const float* cf = cfa.data();
-    float* pd = p_diff.data();
-    float* qd = q_diff.data();
-
+static void rcdStep4_0(const DemosaicPlane& cfa,
+                       DemosaicPlane& p_diff,
+                       DemosaicPlane& q_diff,
+                       int W, int H) {
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
     #endif
     for (int row = 3; row < H - 3; ++row) {
         for (int col = 3; col < W - 3; ++col) {
             const size_t i = static_cast<size_t>(row) * W + col;
-            pd[i] = fsquare(
-                cf[(row - 3) * W + (col - 3)] - cf[(row - 1) * W + (col - 1)]
-                - cf[(row + 1) * W + (col + 1)] + cf[(row + 3) * W + (col + 3)]
-                - 3.0f * (cf[(row - 2) * W + (col - 2)] + cf[(row + 2) * W + (col + 2)])
-                + 6.0f * cf[i]);
-            qd[i] = fsquare(
-                cf[(row - 3) * W + (col + 3)] - cf[(row - 1) * W + (col + 1)]
-                - cf[(row + 1) * W + (col - 1)] + cf[(row + 3) * W + (col - 3)]
-                - 3.0f * (cf[(row - 2) * W + (col + 2)] + cf[(row + 2) * W + (col - 2)])
-                + 6.0f * cf[i]);
+            p_diff.set(i, fsquare(
+                cfa[(row - 3) * W + (col - 3)] - cfa[(row - 1) * W + (col - 1)]
+                - cfa[(row + 1) * W + (col + 1)] + cfa[(row + 3) * W + (col + 3)]
+                - 3.0f * (cfa[(row - 2) * W + (col - 2)] + cfa[(row + 2) * W + (col + 2)])
+                + 6.0f * cfa[i]));
+            q_diff.set(i, fsquare(
+                cfa[(row - 3) * W + (col + 3)] - cfa[(row - 1) * W + (col + 1)]
+                - cfa[(row + 1) * W + (col - 1)] + cfa[(row + 3) * W + (col - 3)]
+                - 3.0f * (cfa[(row - 2) * W + (col + 2)] + cfa[(row + 2) * W + (col - 2)])
+                + 6.0f * cfa[i]));
         }
     }
 }
@@ -314,14 +316,10 @@ static void rcdStep4_0(const std::vector<float>& cfa,
 // Step 4.1: P/Q discrimination at R/B (demosaic.py:213-228)
 // ============================================================
 static void rcdStep4_1(const RawMosaic& m,
-                        const std::vector<float>& p_diff,
-                        const std::vector<float>& q_diff,
-                        std::vector<float>& PQ_dir,
-                        int W, int H) {
-    const float* pd = p_diff.data();
-    const float* qd = q_diff.data();
-    float* pq = PQ_dir.data();
-
+                       const DemosaicPlane& p_diff,
+                       const DemosaicPlane& q_diff,
+                       DemosaicPlane& PQ_dir,
+                       int W, int H) {
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
     #endif
@@ -329,18 +327,18 @@ static void rcdStep4_1(const RawMosaic& m,
         for (int col = kBorder; col < W - kBorder; ++col) {
             if (isGreen(cfaColor(m, row, col))) continue;
             const float P_Stat = std::max(kEpsSq,
-                pd[(row - 1) * W + (col - 1)] + pd[row * W + col] + pd[(row + 1) * W + (col + 1)]);
+                p_diff[(row - 1) * W + (col - 1)] + p_diff[row * W + col] + p_diff[(row + 1) * W + (col + 1)]);
             const float Q_Stat = std::max(kEpsSq,
-                qd[(row - 1) * W + (col + 1)] + qd[row * W + col] + qd[(row + 1) * W + (col - 1)]);
-            pq[row * W + col] = P_Stat / (P_Stat + Q_Stat);
+                q_diff[(row - 1) * W + (col + 1)] + q_diff[row * W + col] + q_diff[(row + 1) * W + (col - 1)]);
+            PQ_dir.set(row * W + col, P_Stat / (P_Stat + Q_Stat));
         }
     }
 }
 
 // step4_2 helper: interpolate one color channel at an R/B position
 // (the opposite color). Port of _rcd_step4_2_color (demosaic.py:235-266).
-static inline float rcdStep4_2_color(const float* rgbc, const float* rgb1,
-                                      const float* PQ_dir,
+static inline float rcdStep4_2_color(const DemosaicPlane& rgbc, const DemosaicPlane& rgb1,
+                                      const DemosaicPlane& PQ_dir,
                                       int row, int col, int W) {
     const float PQ_Central = PQ_dir[row * W + col];
     const float PQ_Neigh = 0.25f * (PQ_dir[(row - 1) * W + (col - 1)] + PQ_dir[(row - 1) * W + (col + 1)]
@@ -376,16 +374,11 @@ static inline float rcdStep4_2_color(const float* rgbc, const float* rgb1,
 // ============================================================
 // color = 2 - fc: fc=0/R -> interp B into rgb2; fc=2/B -> interp R into rgb0.
 static void rcdStep4_2(const RawMosaic& m,
-                        std::vector<float>& rgb0,
-                        std::vector<float>& rgb1,
-                        std::vector<float>& rgb2,
-                        const std::vector<float>& PQ_dir,
-                        int W, int H) {
-    float* r0 = rgb0.data();
-    float* r1 = rgb1.data();
-    float* r2 = rgb2.data();
-    const float* pq = PQ_dir.data();
-
+                       DemosaicPlane& rgb0,
+                       DemosaicPlane& rgb1,
+                       DemosaicPlane& rgb2,
+                       const DemosaicPlane& PQ_dir,
+                       int W, int H) {
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
     #endif
@@ -395,9 +388,9 @@ static void rcdStep4_2(const RawMosaic& m,
             if (isGreen(fc)) continue;
             const int color = 2 - fc;  // opposite color
             if (color == 0) {
-                r0[row * W + col] = rcdStep4_2_color(r0, r1, pq, row, col, W);
+                rgb0.set(row * W + col, rcdStep4_2_color(rgb0, rgb1, PQ_dir, row, col, W));
             } else {  // color == 2
-                r2[row * W + col] = rcdStep4_2_color(r2, r1, pq, row, col, W);
+                rgb2.set(row * W + col, rcdStep4_2_color(rgb2, rgb1, PQ_dir, row, col, W));
             }
         }
     }
@@ -408,7 +401,7 @@ static void rcdStep4_2(const RawMosaic& m,
 // signature also takes the rgb1 plane, but all needed rgb1 values are
 // pre-extracted (rgbi1, rgb1mw/pw/m1/p1) and passed as scalars — the rgb1
 // array itself is never indexed in the body, so it is omitted here.
-static inline float rcdStep4_3_color(const float* rgbc,
+static inline float rcdStep4_3_color(const DemosaicPlane& rgbc,
                                       int row, int col, int W,
                                       float d, float rgbi1,
                                       float N1, float S1, float W1, float E1,
@@ -444,16 +437,11 @@ static inline float rcdStep4_3_color(const float* rgbc,
 // At FC==1 positions, interpolate BOTH rgb0 (R) and rgb2 (B) using the
 // green-plane VH discrimination + cardinal gradients.
 static void rcdStep4_3(const RawMosaic& m,
-                        std::vector<float>& rgb0,
-                        std::vector<float>& rgb1,
-                        std::vector<float>& rgb2,
-                        const std::vector<float>& VH_dir,
-                        int W, int H) {
-    float* r0 = rgb0.data();
-    float* r1 = rgb1.data();
-    float* r2 = rgb2.data();
-    const float* vh = VH_dir.data();
-
+                       DemosaicPlane& rgb0,
+                       DemosaicPlane& rgb1,
+                       DemosaicPlane& rgb2,
+                       const DemosaicPlane& VH_dir,
+                       int W, int H) {
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
     #endif
@@ -461,31 +449,31 @@ static void rcdStep4_3(const RawMosaic& m,
         for (int col = kBorder; col < W - kBorder; ++col) {
             if (!isGreen(cfaColor(m, row, col))) continue;
 
-            const float VH_Central = vh[row * W + col];
-            const float VH_Neigh = 0.25f * (vh[(row - 1) * W + (col - 1)] + vh[(row - 1) * W + (col + 1)]
-                                            + vh[(row + 1) * W + (col - 1)] + vh[(row + 1) * W + (col + 1)]);
+            const float VH_Central = VH_dir[row * W + col];
+            const float VH_Neigh = 0.25f * (VH_dir[(row - 1) * W + (col - 1)] + VH_dir[(row - 1) * W + (col + 1)]
+                                            + VH_dir[(row + 1) * W + (col - 1)] + VH_dir[(row + 1) * W + (col + 1)]);
             const float VH_Disc = (std::fabs(0.5f - VH_Central) < std::fabs(0.5f - VH_Neigh))
                                   ? VH_Neigh : VH_Central;
 
-            const float rgbi1 = r1[row * W + col];
-            const float N1 = kEps + std::fabs(rgbi1 - r1[(row - 2) * W + col]);
-            const float S1 = kEps + std::fabs(rgbi1 - r1[(row + 2) * W + col]);
-            const float W1 = kEps + std::fabs(rgbi1 - r1[row * W + (col - 2)]);
-            const float E1 = kEps + std::fabs(rgbi1 - r1[row * W + (col + 2)]);
+            const float rgbi1 = rgb1[row * W + col];
+            const float N1 = kEps + std::fabs(rgbi1 - rgb1[(row - 2) * W + col]);
+            const float S1 = kEps + std::fabs(rgbi1 - rgb1[(row + 2) * W + col]);
+            const float W1 = kEps + std::fabs(rgbi1 - rgb1[row * W + (col - 2)]);
+            const float E1 = kEps + std::fabs(rgbi1 - rgb1[row * W + (col + 2)]);
 
-            const float rgb1mw = r1[(row - 1) * W + col];
-            const float rgb1pw = r1[(row + 1) * W + col];
-            const float rgb1m1 = r1[row * W + (col - 1)];
-            const float rgb1p1 = r1[row * W + (col + 1)];
+            const float rgb1mw = rgb1[(row - 1) * W + col];
+            const float rgb1pw = rgb1[(row + 1) * W + col];
+            const float rgb1m1 = rgb1[row * W + (col - 1)];
+            const float rgb1p1 = rgb1[row * W + (col + 1)];
 
             const float d = clipf(VH_Disc);
 
-            r0[row * W + col] = rcdStep4_3_color(r0, row, col, W,
-                                                  d, rgbi1, N1, S1, W1, E1,
-                                                  rgb1mw, rgb1pw, rgb1m1, rgb1p1);
-            r2[row * W + col] = rcdStep4_3_color(r2, row, col, W,
-                                                  d, rgbi1, N1, S1, W1, E1,
-                                                  rgb1mw, rgb1pw, rgb1m1, rgb1p1);
+            rgb0.set(row * W + col, rcdStep4_3_color(rgb0, row, col, W,
+                                                      d, rgbi1, N1, S1, W1, E1,
+                                                      rgb1mw, rgb1pw, rgb1m1, rgb1p1));
+            rgb2.set(row * W + col, rcdStep4_3_color(rgb2, row, col, W,
+                                                      d, rgbi1, N1, S1, W1, E1,
+                                                      rgb1mw, rgb1pw, rgb1m1, rgb1p1));
         }
     }
 }
@@ -494,15 +482,12 @@ static void rcdStep4_3(const RawMosaic& m,
 // Step 5: Write output (demosaic.py:365-377)
 // ============================================================
 // Interior only (skip kBorder px); out = max(., 0) per channel.
-static void rcdWriteOutput(const std::vector<float>& rgb0,
-                            const std::vector<float>& rgb1,
-                            const std::vector<float>& rgb2,
-                            ImageBuffer& out) {
+static void rcdWriteOutput(const DemosaicPlane& rgb0,
+                           const DemosaicPlane& rgb1,
+                           const DemosaicPlane& rgb2,
+                           ImageBuffer& out) {
     const int W = out.width;
     const int H = out.height;
-    const float* r0 = rgb0.data();
-    const float* r1 = rgb1.data();
-    const float* r2 = rgb2.data();
 
     #ifdef RA_USE_OPENMP
     #pragma omp parallel for schedule(static) collapse(2)
@@ -511,9 +496,9 @@ static void rcdWriteOutput(const std::vector<float>& rgb0,
         for (int col = kBorder; col < W - kBorder; ++col) {
             const size_t i = static_cast<size_t>(row) * W + col;
             float* px = out.pixel(row, col);
-            px[0] = std::max(0.0f, r0[i]);
-            px[1] = std::max(0.0f, r1[i]);
-            px[2] = std::max(0.0f, r2[i]);
+            px[0] = std::max(0.0f, rgb0[i]);
+            px[1] = std::max(0.0f, rgb1[i]);
+            px[2] = std::max(0.0f, rgb2[i]);
         }
     }
 }
@@ -529,39 +514,46 @@ static void borderInterpolate(const RawMosaic& m, ImageBuffer& out) {
     const int H = m.height;
     const float* bayer = m.data.data();
 
+    // Per-pixel 3x3 bilinear estimate into the output at a border position.
+    auto body = [&](int row, int col) {
+        float sums[3] = {0.0f, 0.0f, 0.0f};
+        float counts[3] = {0.0f, 0.0f, 0.0f};
+
+        for (int dy = -1; dy <= 1; ++dy) {
+            const int y = row + dy;
+            if (y < 0 || y >= H) continue;
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int x = col + dx;
+                if (x < 0 || x >= W) continue;
+                int c = cfaColor(m, y, x);
+                if (c == 3) c = 1;  // G2 -> G for indexing
+                const float val = std::max(0.0f, bayer[static_cast<size_t>(y) * W + x]);
+                sums[c]   += val;
+                counts[c] += 1.0f;
+            }
+        }
+
+        float* px = out.pixel(row, col);
+        for (int c = 0; c < 3; ++c) {
+            if (counts[c] > 0.0f) {
+                px[c] = sums[c] / counts[c];
+            }
+            // else: leave the existing value (0.0f from ImageBuffer init).
+        }
+    };
+
+    // Iterate ONLY the border ring (avoid ~H*W interior no-ops): full-width
+    // top/bottom bands plus the two side strips on interior rows. Identical
+    // pixel set to the previous full-HxW loop with the interior `continue`.
     #ifdef RA_USE_OPENMP
-    #pragma omp parallel for schedule(static) collapse(2)
+    #pragma omp parallel for schedule(static)
     #endif
     for (int row = 0; row < H; ++row) {
-        for (int col = 0; col < W; ++col) {
-            // Skip interior — only process the border ring.
-            if (row >= kBorder && row < H - kBorder && col >= kBorder && col < W - kBorder)
-                continue;
-
-            float sums[3] = {0.0f, 0.0f, 0.0f};
-            float counts[3] = {0.0f, 0.0f, 0.0f};
-
-            for (int dy = -1; dy <= 1; ++dy) {
-                const int y = row + dy;
-                if (y < 0 || y >= H) continue;
-                for (int dx = -1; dx <= 1; ++dx) {
-                    const int x = col + dx;
-                    if (x < 0 || x >= W) continue;
-                    int c = cfaColor(m, y, x);
-                    if (c == 3) c = 1;  // G2 -> G for indexing
-                    const float val = std::max(0.0f, bayer[static_cast<size_t>(y) * W + x]);
-                    sums[c]   += val;
-                    counts[c] += 1.0f;
-                }
-            }
-
-            float* px = out.pixel(row, col);
-            for (int c = 0; c < 3; ++c) {
-                if (counts[c] > 0.0f) {
-                    px[c] = sums[c] / counts[c];
-                }
-                // else: leave the existing value (0.0f from ImageBuffer init).
-            }
+        if (row < kBorder || row >= H - kBorder) {
+            for (int col = 0; col < W; ++col) body(row, col);
+        } else {
+            for (int col = 0; col < kBorder; ++col) body(row, col);
+            for (int col = W - kBorder; col < W; ++col) body(row, col);
         }
     }
 }
@@ -579,8 +571,9 @@ ImageBuffer rcdDemosaic(const RawMosaic& m) {
     ImageBuffer out(W, H, 3);
 
     // Persistent intermediates (freed in stages below to match the reference
-    // `del` ordering and keep peak memory at ~7 x H x W x 4 bytes).
-    std::vector<float> cfa(N), rgb0(N, 0.0f), rgb1(N, 0.0f), rgb2(N, 0.0f), VH_dir(N, 0.0f);
+    // `del` ordering and keep peak memory at ~7 x H x W x 4 bytes; F16 storage
+    // on ARM64 halves this).
+    DemosaicPlane cfa(N), rgb0(N), rgb1(N), rgb2(N), VH_dir(N);
 
     // Steps 0-1: populate + VH discrimination.
     rcdPopulate(m, cfa, rgb0, rgb1, rgb2);
@@ -588,7 +581,7 @@ ImageBuffer rcdDemosaic(const RawMosaic& m) {
 
     // Step 2-3: low-pass + green interp. lpf freed at scope exit.
     {
-        std::vector<float> lpf(N, 0.0f);
+        DemosaicPlane lpf(N);
         rcdStep2(m, cfa, lpf, W, H);
         rcdStep3(m, cfa, lpf, rgb1, VH_dir, W, H);
     }
@@ -601,12 +594,12 @@ ImageBuffer rcdDemosaic(const RawMosaic& m) {
     fillBorderIntermediates(m, rgb0, rgb1, rgb2);
 
     // Step 4.0: P/Q diagonal high-pass (uses cfa, then cfa is no longer needed).
-    std::vector<float> p_diff(N, 0.0f), q_diff(N, 0.0f);
+    DemosaicPlane p_diff(N), q_diff(N);
     rcdStep4_0(cfa, p_diff, q_diff, W, H);
     freeVector(cfa);  // mirror `del cfa` (demosaic.py:508)
 
     // Step 4.1: P/Q discrimination (uses p_diff, q_diff; FC via cfaColor(m,..)).
-    std::vector<float> PQ_dir(N, 0.0f);
+    DemosaicPlane PQ_dir(N);
     rcdStep4_1(m, p_diff, q_diff, PQ_dir, W, H);
     freeVector(p_diff);  // mirror `del p_diff, q_diff`
     freeVector(q_diff);

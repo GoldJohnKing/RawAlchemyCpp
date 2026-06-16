@@ -28,6 +28,12 @@
 #include "common.h"
 #include "raw_mosaic.h"
 
+#include <cstring>   // memcpy
+#include <vector>
+#if defined(__aarch64__)
+#include <cstdint>   // uint16_t
+#endif
+
 namespace rawalchemy {
 
 /**
@@ -68,5 +74,43 @@ ImageBuffer rcdDemosaic(const RawMosaic& m);
  * @return   Demosaiced camera-RGB image (H x W x 3, float, pre-WB/pre-matrix).
  */
 ImageBuffer xtransMarkesteijnDemosaic(const RawMosaic& m);
+
+// Demosaic intermediate plane. F16 storage on ARM64 (halves memory: ~1.3GB->0.65GB
+// Bayer, ~3GB->1.5GB X-Trans), F32 elsewhere. Arithmetic is always F32: reads
+// upcast, writes downcast. Mirrors the "F16 storage / F32 compute" pattern of
+// log_transform.cpp / lut_applier.cpp.
+class DemosaicPlane {
+public:
+    DemosaicPlane() = default;
+    explicit DemosaicPlane(int n) { storage_.resize(static_cast<size_t>(n)); }
+    void resize(int n) { storage_.resize(static_cast<size_t>(n)); }
+    int size() const { return static_cast<int>(storage_.size()); }
+    // READ -- F16->F32 on ARM64, passthrough elsewhere.
+    inline float operator[](int idx) const {
+#if defined(__aarch64__)
+        __fp16 h; std::memcpy(&h, &storage_[idx], 2);
+        return static_cast<float>(h);
+#else
+        return storage_[idx];
+#endif
+    }
+    // WRITE -- F32->F16 on ARM64, passthrough elsewhere.
+    inline void set(int idx, float v) {
+#if defined(__aarch64__)
+        __fp16 h = static_cast<__fp16>(v);
+        std::memcpy(&storage_[idx], &h, 2);
+#else
+        storage_[idx] = v;
+#endif
+    }
+    // Release storage immediately (used by freeVector to mirror Python `del`).
+    void clear() { decltype(storage_)().swap(storage_); }
+private:
+#if defined(__aarch64__)
+    std::vector<uint16_t> storage_;   // IEEE-754 binary16 bits
+#else
+    std::vector<float> storage_;      // F32 (reference path)
+#endif
+};
 
 } // namespace rawalchemy
