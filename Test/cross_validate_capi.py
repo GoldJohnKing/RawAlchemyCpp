@@ -1,16 +1,19 @@
 """
-Cross-validation: C API uses the custom CPU demosaic pipeline (Phases 1-5).
+Cross-validation: C API uses the custom CPU demosaic pipeline (Phases 1-5)
+WITH LibRaw's own denoise stages (green_matching + wavelet + FBDD + post-
+demosaic chroma median) wired in via decodeImageWithCustomPipeline.
 
 Definitive integration proof that src/raw_alchemy_capi.cpp routes through the
-new custom pipeline (decodeRawMosaic -> preprocess -> highlight -> RCD/
+custom pipeline (decodeRawMosaic -> preprocess -> highlight -> RCD/
 Markesteijn -> WB -> flip -> camera->ProPhoto matrix) with auto-fallback,
-instead of the old LibRaw dcraw path (decodeRaw).
+instead of the old LibRaw dcraw path (decodeRaw), AND that the LibRaw denoise
+stages are now applied (restoring the color-noise control dcraw_process had).
 
 Three outputs from the SAME input + SAME downstream settings (auto matrix
 exposure, sat/cont boost, F-Log2 log, NO lens correction, no LUT):
 
-  1. C API   : raw_alchemy_capi_test  (raProcessFileWithLUT -> custom path)
-  2. CLI auto: raw_alchemy_cli --demosaic auto   (custom path, the reference)
+  1. C API   : raw_alchemy_capi_test  (custom path + LibRaw denoise)
+  2. CLI auto: raw_alchemy_cli --demosaic auto   (custom path, NO denoise)
   3. CLI ahd : raw_alchemy_cli --demosaic ahd    (dcraw path — the OLD path)
 
 Per-channel means are compared:
@@ -20,6 +23,16 @@ Per-channel means are compared:
 PASS requires BOTH conditions. This proves the C API now uses the custom
 pipeline (matches CLI-auto) and is NOT silently still on the dcraw path
 (differs from CLI-ahd).
+
+DENOISE / ISO NOTE: the LibRaw denoise strength is ISO-adaptive
+(threshold>0 and fbdd>=1 only above ISO 100 — see raw_pipeline.cpp). The
+shipped sample (Test/Sample.NEF) is base ISO, so denoise is DISABLED and the
+C API is bit-identical to CLI-auto (criterion [1] reads 0.0%). For a HIGH-ISO
+sample, denoise activates and the C API will legitimately DIFFER from
+CLI-auto; criterion [1] would then need relaxing (compare the C API's noise
+variance, not its mean, against CLI-auto). The means are preserved by denoise
+(wavelet/FBDD/median are mean-preserving), so even when active the per-channel
+mean rel-diff stays small — but no longer exactly 0.
 
 Run with the Raw-Alchemy venv (has tifffile + numpy):
     /mnt/d/GitRepos/Raw-Alchemy/.venv/bin/python \\
