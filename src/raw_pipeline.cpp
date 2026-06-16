@@ -185,29 +185,28 @@ ImageBuffer decodeImageWithCustomPipeline(
         }
         params.fbdd_noiserd = fbddMode;
 
-        // scale_colors() uses O.use_camera_wb + O.highlight to derive pre_mul.
-        // use_camera_wb=1 makes it consume the camera WB (cam_mul), and a
-        // non-zero highlight keeps dmax = max(pre_mul) so the normalization
-        // mirrors applyWhiteBalance's green/max-anchored scaling.
-        params.use_camera_wb = 1;
-        params.highlight = 2;              // match decodeRaw convention
-        params.med_passes = 2;             // post-demosaic chroma median
+        // scale_colors() uses a MAX-ANCHORED WB normalization
+        // (pre_mul = cam_mul / max(cam_mul)), which crushes the green channel
+        // relative to the custom pipeline's GREEN-ANCHORED applyWhiteBalance.
+        // This causes a systematic magenta/pink cast. FIX: skip scale_colors
+        // (and wavelet_denoise which runs inside it); apply WB via the custom
+        // green-anchored applyWhiteBalance downstream instead.
+        // green_matching + median_filter have no WB dependency and are safe.
         params.green_matching = 1;
+        params.med_passes = 2;
 
-        // --- Pre-demosaic LibRaw denoise (LibRaw's OWN compiled code) ---
-        // green_matching: G1/G3 equalization (CFA domain).
-        // scale_colors:   WB multiply + wavelet_denoise (threshold > 0).
-        // fbdd:           CFA-domain chroma denoise.
+        // --- Pre-demosaic: green_matching only (no scale_colors / wavelet / fbdd) ---
         rawProcessor.green_matching();
-        rawProcessor.scale_colors();
-        rawProcessor.fbdd(fbddMode);
 
         // --- Extract denoised CFA mosaic from imgdata.image ---
-        // After raw2image_ex (shrink=0) + denoise, imgdata.image is
-        // ushort[iheight*iwidth][4] holding the visible region. Each pixel has
-        // ONLY its CFA-active channel populated (pre-demosaic). scale_colors
-        // already applied WB + normalized the white point to ~65535, so
-        // dividing by 65535 yields float in [0,1].
+        // After raw2image_ex (shrink=0) + subtract_black_internal +
+        // green_matching, imgdata.image is ushort[iheight*iwidth][4] holding
+        // the visible region. Each pixel has ONLY its CFA-active channel
+        // populated (pre-demosaic, pre-WB). scale_colors was NOT called, so the
+        // values are raw sensor values (post-black-subtraction, NOT WB-scaled).
+        // Normalize by imgdata.color.maximum (the white point) to get [0,1].
+        const float whitePoint = static_cast<float>(rawProcessor.imgdata.color.maximum);
+        const float normDiv = (whitePoint > 0.0f) ? whitePoint : 65535.0f;
         const auto& sizes = rawProcessor.imgdata.sizes;
         const auto& idata = rawProcessor.imgdata.idata;
         const auto& color = rawProcessor.imgdata.color;
@@ -238,13 +237,10 @@ ImageBuffer decodeImageWithCustomPipeline(
         // benign if ever re-introduced.
         for (int c = 0; c < 4; ++c) mosaic.cblack[c] = 0.0f;
         mosaic.maximum = 1.0f;
-        // cam_mul is set to neutral so highlightInpaintOpposed (which expects
-        // pre-WB data) uses a uniform clip threshold on the post-WB mosaic:
-        // the max-gain channel saturates at ~1.0, so a flat 0.987 threshold
-        // correctly flags sensor-clipped photosites for inpaint-opposed
-        // reconstruction. applyWhiteBalance is intentionally skipped because
-        // scale_colors already applied the camera WB.
-        for (int c = 0; c < 4; ++c) mosaic.cam_mul[c] = 1.0f;
+        // cam_mul is the REAL camera WB (scale_colors was NOT called, so WB
+        // is NOT applied yet). highlightInpaintOpposed + applyWhiteBalance
+        // downstream will use these correctly.
+        for (int c = 0; c < 4; ++c) mosaic.cam_mul[c] = color.cam_mul[c];
 
         mosaic.data.resize(static_cast<size_t>(W) * H);
         ushort(*img4)[4] = rawProcessor.imgdata.image;
@@ -253,19 +249,21 @@ ImageBuffer decodeImageWithCustomPipeline(
                 const int ch = std::min(cfaColor(mosaic, y, x), 3);
                 const ushort val = img4[static_cast<size_t>(y) * W + x][ch];
                 mosaic.data[static_cast<size_t>(y) * W + x] =
-                    static_cast<float>(val) / 65535.0f;
+                    static_cast<float>(val) / normDiv;
             }
         }
 
-        // --- Custom pipeline (Phases 2-4) on the denoised mosaic ---
+        // --- Custom pipeline (Phases 2-5) on the denoised mosaic ---
         // subtractBlackLevel: SKIPPED (subtract_black_internal did it).
-        // applyWhiteBalance:  SKIPPED (scale_colors did it).
+        // applyWhiteBalance:  APPLIED (green-anchored, correct — scale_colors was NOT called).
         fixHotPixels(mosaic);
         highlightInpaintOpposed(mosaic);
 
         ImageBuffer img = (mosaic.filters == 9)
             ? xtransMarkesteijnDemosaic(mosaic)
             : rcdDemosaic(mosaic);
+
+        applyWhiteBalance(img, mosaic.cam_mul);
 
         // --- Post-demosaic chroma median via LibRaw's median_filter ---
         // Round-trip img (camera-RGB float [0,1]) through imgdata.image
