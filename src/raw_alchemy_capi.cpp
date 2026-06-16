@@ -132,14 +132,24 @@ RA_API int RA_CALL raImageGetDataSizeBytes(RaImageBuffer buf) {
 // ----------------------------------------------------------------
 namespace {
 
-RaResult runPipeline(rawalchemy::ImageBuffer& img,
-                     const rawalchemy::CameraMetadata& meta,
-                     const char* logSpace,
-                     const char* lutPath,
-                     const char* metering,
-                     float evOffset,
-                     int enableLensCorrection,
-                     const char* customLensfunDb) {
+// ----------------------------------------------------------------
+//  Internal: unified pipeline. The three public-ish helpers below
+//  (runPipeline / runPipelineWithLUT / runGradingOnly) are thin
+//  forwarders that select the LUT source and whether lens correction
+//  runs; ~90% of the body lives here.
+// ----------------------------------------------------------------
+// Contract: at most one of {lutPath, lutPtr} non-null (path takes precedence).
+// meta is read ONLY when enableLensCorrection != 0.
+static RaResult runPipelineImpl(
+    rawalchemy::ImageBuffer& img,
+    const rawalchemy::CameraMetadata& meta,
+    const char* logSpace,
+    const char* metering,
+    float evOffset,
+    const char* lutPath,                         // mode A: load from file
+    const rawalchemy::LUT3D* lutPtr,             // mode B: pre-loaded
+    int enableLensCorrection,
+    const char* customLensfunDb) {
     // Lens correction (separate pass — spatial operation)
     if (enableLensCorrection) {
         try {
@@ -170,14 +180,18 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
         return catchExceptions("exposure");
     }
 
-    // Load LUT from file
-    rawalchemy::LUT3D lut;
+    // LUT acquisition: mode A loads from a file path, mode B reuses a
+    // pre-loaded table. On a path-mode load failure we abort before any
+    // grading state is touched.
+    rawalchemy::LUT3D loadedLut;
+    const rawalchemy::LUT3D* lutToUse = lutPtr;
     if (lutPath) {
         try {
-            lut = rawalchemy::loadCubeLUT(std::string(lutPath));
+            loadedLut = rawalchemy::loadCubeLUT(std::string(lutPath));
         } catch (...) {
             return catchExceptions("LUT load");
         }
+        lutToUse = &loadedLut;
     }
 
     // Build grading params
@@ -197,8 +211,13 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
         gp.logSpaceInfo = &(it->second);
     }
 
+    // Dual-branch LUT gate (preserves per-mode semantics):
+    //   - path mode (runPipeline): set unconditionally after a successful load
+    //   - pointer mode (runPipelineWithLUT / runGradingOnly): set only when non-empty
     if (lutPath) {
-        gp.lut = &lut;
+        gp.lut = lutToUse;
+    } else if (lutToUse && !lutToUse->empty()) {
+        gp.lut = lutToUse;
     }
 
     // Fused single-pass grading
@@ -211,6 +230,18 @@ RaResult runPipeline(rawalchemy::ImageBuffer& img,
     return RA_OK;
 }
 
+RaResult runPipeline(rawalchemy::ImageBuffer& img,
+                     const rawalchemy::CameraMetadata& meta,
+                     const char* logSpace,
+                     const char* lutPath,
+                     const char* metering,
+                     float evOffset,
+                     int enableLensCorrection,
+                     const char* customLensfunDb) {
+    return runPipelineImpl(img, meta, logSpace, metering, evOffset, lutPath, nullptr,
+                           enableLensCorrection, customLensfunDb);
+}
+
 RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
                             const rawalchemy::CameraMetadata& meta,
                             const char* logSpace,
@@ -219,65 +250,8 @@ RaResult runPipelineWithLUT(rawalchemy::ImageBuffer& img,
                             float evOffset,
                             int enableLensCorrection,
                             const char* customLensfunDb) {
-    // Lens correction
-    if (enableLensCorrection) {
-        try {
-            rawalchemy::LensCorrectionParams lcParams;
-            lcParams.enabled = true;
-            lcParams.correctDistortion = true;
-            lcParams.correctTca = true;
-            lcParams.correctVignetting = true;
-            lcParams.distance = 1000.0f;
-            if (customLensfunDb) lcParams.customDbPath = customLensfunDb;
-            rawalchemy::applyLensCorrection(img, meta, lcParams);
-        } catch (...) {
-            return catchExceptions("lens correction");
-        }
-    }
-
-    // Exposure metering
-    float gain = 1.0f;
-    try {
-        std::string mode(metering ? metering : "matrix");
-        if (!rawalchemy::isMeteringModeSupported(mode)) {
-            setError(std::string("Unsupported metering mode: ") + mode);
-            return RA_ERR_INVALID_PARAM;
-        }
-        gain = rawalchemy::computeAutoGain(img, mode);
-        gain *= std::pow(2.0f, evOffset);
-    } catch (...) {
-        return catchExceptions("exposure");
-    }
-
-    // Build grading params
-    rawalchemy::GradingParams gp;
-    gp.gain = gain;
-    gp.enableBoost = true;
-    gp.saturation = 1.25f;
-    gp.contrast = 1.10f;
-    gp.pivot = 0.18f;
-
-    if (logSpace) {
-        auto it = rawalchemy::LOG_SPACES.find(std::string(logSpace));
-        if (it == rawalchemy::LOG_SPACES.end()) {
-            setError(std::string("Unsupported log space: ") + logSpace);
-            return RA_ERR_LOG_UNSUPPORTED;
-        }
-        gp.logSpaceInfo = &(it->second);
-    }
-
-    if (lut && !lut->empty()) {
-        gp.lut = lut;
-    }
-
-    // Fused single-pass grading
-    try {
-        rawalchemy::applyGradingFused(img, gp);
-    } catch (...) {
-        return catchExceptions("grading");
-    }
-
-    return RA_OK;
+    return runPipelineImpl(img, meta, logSpace, metering, evOffset, nullptr, lut,
+                           enableLensCorrection, customLensfunDb);
 }
 
 /// Apply grading pipeline (exposure -> sat/contrast -> log -> LUT) to an image.
@@ -289,48 +263,8 @@ RaResult runGradingOnly(
     const char* metering,
     float evOffset)
 {
-    // Exposure metering (subsampled)
-    float gain = 1.0f;
-    try {
-        std::string mode(metering ? metering : "matrix");
-        if (!rawalchemy::isMeteringModeSupported(mode)) {
-            setError(std::string("Unsupported metering mode: ") + mode);
-            return RA_ERR_INVALID_PARAM;
-        }
-        gain = rawalchemy::computeAutoGain(img, mode);
-        gain *= std::pow(2.0f, evOffset);
-    } catch (...) {
-        return catchExceptions("exposure");
-    }
-
-    // Build grading params
-    rawalchemy::GradingParams gp;
-    gp.gain = gain;
-    gp.enableBoost = true;
-    gp.saturation = 1.25f;
-    gp.contrast = 1.10f;
-    gp.pivot = 0.18f;
-
-    if (logSpace) {
-        auto it = rawalchemy::LOG_SPACES.find(std::string(logSpace));
-        if (it == rawalchemy::LOG_SPACES.end()) {
-            setError(std::string("Unsupported log space: ") + logSpace);
-            return RA_ERR_LOG_UNSUPPORTED;
-        }
-        gp.logSpaceInfo = &(it->second);
-    }
-
-    if (lut && !lut->empty()) {
-        gp.lut = lut;
-    }
-
-    try {
-        rawalchemy::applyGradingFused(img, gp);
-    } catch (...) {
-        return catchExceptions("grading");
-    }
-
-    return RA_OK;
+    return runPipelineImpl(img, rawalchemy::CameraMetadata{}, logSpace, metering, evOffset,
+                           nullptr, lut, 0, nullptr);
 }
 
 } // anonymous namespace
