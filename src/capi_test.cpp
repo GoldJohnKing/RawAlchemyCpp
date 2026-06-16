@@ -125,8 +125,10 @@ int main(int argc, char** argv) {
 
     // Run the C API one-shot path: decode (custom demosaic pipeline) ->
     // exposure -> sat/contrast -> log -> (no LUT) -> output. No LUT (NULL
-    // table), auto exposure via matrix metering, no lens correction. Output
-    // format is auto-detected from the extension by raProcessFileWithLUT.
+    // table), auto exposure (evOffset=0 = matrix metering, no manual bias),
+    // no lens correction. Output format is auto-detected from the extension
+    // by raProcessFileWithLUT. (Signature after main's c7ef366: useAutoExposure
+    // removed, manualEv renamed to evOffset.)
     RaResult res = raProcessFileWithLUT(
         inputPath,
         outputPath,
@@ -136,8 +138,7 @@ int main(int argc, char** argv) {
         /*lutDomainMin*/ nullptr,
         /*lutDomainMax*/ nullptr,
         /*metering*/ "matrix",
-        /*manualEv*/ 0.0f,
-        /*useAutoExposure*/ 1,
+        /*evOffset*/ 0.0f,
         /*jpegQuality*/ 90,
         /*enableLensCorrection*/ 0,
         /*customLensfunDb*/ nullptr);

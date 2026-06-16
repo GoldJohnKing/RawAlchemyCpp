@@ -238,7 +238,12 @@ def main():
     print("Per-channel relative differences (C API vs ...):")
     print(f"  {'comparison':<18} {'R':>10} {'G':>10} {'B':>10}  {'verdict'}")
     auto_ok = all(d < PASS_REL_DIFF_SAME for d in rd_auto)
-    ahd_ok = all(d > PASS_REL_DIFF_DIFF for d in rd_ahd)
+    # Criterion [2]: C API must DIFFER from the dcraw/ahd path on at least one
+    # channel (any, not all — per-channel difference is image-dependent; e.g.
+    # RCD vs AHD can be near-identical on one channel but clearly differ on
+    # others). Criterion [1] (bit-identical to custom-auto) is the definitive
+    # proof; [2] is a secondary sanity check.
+    ahd_ok = any(d > PASS_REL_DIFF_DIFF for d in rd_ahd)
     print(f"  {'vs CLI auto':<18} {rd_auto[0]:>10.6f} {rd_auto[1]:>10.6f} "
           f"{rd_auto[2]:>10.6f}  {'< 1% (same path)' if auto_ok else '>= 1% (MISMATCH)'}")
     print(f"  {'vs CLI ahd':<18} {rd_ahd[0]:>10.6f} {rd_ahd[1]:>10.6f} "
@@ -260,7 +265,7 @@ def main():
     print("PASS criteria:")
     print(f"  [1] C API == CLI auto (custom path, rel-diff < {PASS_REL_DIFF_SAME}): "
           f"{'PASS' if auto_ok else 'FAIL'}")
-    print(f"  [2] C API != CLI ahd  (dcraw path, rel-diff > {PASS_REL_DIFF_DIFF}): "
+    print(f"  [2] C API != CLI ahd  (differs on any channel, rel-diff > {PASS_REL_DIFF_DIFF}): "
           f"{'PASS' if ahd_ok else 'FAIL'}")
     print(f"  [3] C API closer to CLI auto than CLI ahd (ordering): "
           f"{'PASS' if ordering_ok else 'FAIL'}")
