@@ -48,12 +48,27 @@ struct DecodeParams {
     int highlightMode = 2;
 
     /// Demosaic quality:
-    ///   3  = AHD (Adaptive Homogeneity-Directed, widely used)
-    ///   11 = AAHD (Adaptive AHD, slightly better, needs LibRaw >= 0.17)
-    int demosaicQuality = 3;
+    ///   3  = AHD (Adaptive Homogeneity-Directed)
+    ///   9  = LMMSE (best moiré suppression for high-ISO)
+    ///   11 = DHT (Directional — best detail, sharp edges)
+    int demosaicQuality = 11;
 
     /// Half-size mode for fast preview (optional)
     bool halfSize = false;
+
+    /// Green channel matching: equalize G1/G3 difference (Fixed Pattern Noise)
+    bool greenMatching = true;
+
+    /// Median filter passes (post-demosaic, chroma only): 0=off
+    int medPasses = 2;
+
+    /// Pre-demosaic noise reduction (FBDD): 0=off, 1=light, 2=full
+    /// Operates on raw Bayer data before demosaic — more effective than post-demosaic
+    /// denoising for chroma noise and false color artifacts.
+    int fbddNoiserd = -1;
+
+    /// Wavelet denoise threshold: <0 = auto (ISO-adaptive), 0 = off, >0 = manual
+    float denoiseThreshold = -1.0f;
 };
 
 /**

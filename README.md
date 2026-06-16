@@ -34,7 +34,10 @@ The core design, processing pipeline, color science algorithms, and metering str
 | CLI 界面 / CLI interface | Click 框架 | 原生命令行参数解析 |
 | C API / FFI 接口 | 无 | C API (`raw_alchemy_capi.h`) + DLL/SO 导出 |
 | 跨平台构建 / Cross-platform build | — | Windows (MSVC/MinGW), Linux, Android (NDK) |
-| GUI 界面 / GUI | Tkinter GUI + matplotlib 预览 | 无 (仅 CLI) |
+| 融合调色管线 / Fused grading | 5 次独立遍历 | 单遍融合 (5× 带宽优化) |
+| 图像缩放 / Image resize | — | 等比缩小 (预览场景) |
+| 预览会话 / Preview session | matplotlib 异步渲染 | C API 两阶段预览 (解码一次, 快速重调色) |
+| GUI 界面 / GUI | Tkinter GUI + matplotlib 预览 | 无 (仅 CLI, C API 支持宿主实现预览) |
 | 批处理 / Batch processing | ProcessPoolExecutor 并行 | 无 (单文件处理) |
 | 实时预览 / Live preview | matplotlib 异步渲染 | 无 |
 | HEIF 输出 / HEIF output | pillow-heif (10-bit) | 不支持 |
@@ -61,6 +64,7 @@ The core design, processing pipeline, color science algorithms, and metering str
 | **像素级操作** | Numba JIT 编译 (`@njit(parallel=True, fastmath=True)`) | 手写 C++ 循环 + OpenMP `#pragma omp parallel for` |
 | **矩阵变换** | NumPy 扁平化 + 展开乘法 | 逐像素内联 3×3 乘法 |
 | **LUT 查找** | Numba 四面体插值 | 相同算法，C++ 原生实现 |
+| **调色管线** | 5 次独立遍历 (曝光/饱和/色域/Log/LUT) | 融合单遍遍历 (内存带宽降低 5×, 24MP 图 ~2740MB → ~548MB) |
 | **镜头校正重采样** | SciPy `map_coordinates` (双三次) | 手写 Catmull-Rom 双三次插值 (4×4 核) |
 | **内存布局** | NumPy ndarray (H×W×3) | `std::vector<float>` 平铺存储 (W×H×3)；ARM64 可选 `std::vector<uint16_t>` float16 中间缓冲 (带宽减半) |
 
@@ -87,9 +91,10 @@ The core design, processing pipeline, color science algorithms, and metering str
 |---|---|---|
 | **模块耦合** | Python 模块间函数调用 | 头文件 + 编译单元，静态库 `raw_alchemy_core` |
 | **入口点** | CLI (`cli.py`) + GUI (`gui.py`) 双入口 | CLI (`main.cpp`) + C API (`raw_alchemy_capi.cpp`) |
-| **管线编排** | `core.py` 函数式编排 | `main.cpp` 内联管线 / C API one-shot |
+| **管线编排** | `core.py` 函数式编排 (5 次独立遍历) | `main.cpp` 内联管线 / C API one-shot / `grading_fused` 单遍融合 |
 | **日志** | 自定义 Logger (print/Queue/callback) | stderr 直出 |
 | **测光接口** | Protocol 策略模式 + 类继承 | 函数式，通过枚举 + switch 分发 |
+| **预览模式** | matplotlib 异步渲染 | C API Preview Session (解码+校正一次, 快速重调色) |
 
 ---
 
@@ -109,33 +114,18 @@ RAW 文件
 [步骤 1.5] 镜头校正 (可选)  applyLensCorrection() via Lensfun
   │           暗角 → 畸变 + 色差 (Catmull-Rom 双三次重采样)
   ▼
-[步骤 2] 曝光控制 ────── computeAutoGain() 或手动 EV
-  │         5 种测光模式: 平均 / 中央重点 / 高光安全 / 混合 / 矩阵
+[步骤 2-5] 融合调色管线 ── applyGradingFused()
+  │         单遍完成以下5步，内存带宽降低5倍：
+  │         2. 曝光控制: computeAutoGain() + evOffset
+  │         3. 饱和度/对比度增强: ×1.25 / ×1.10
+  │         4. 色域变换 + Log曲线编码 (ProPhoto → 目标色域)
+  │         5. 3D LUT 四面体插值 (可选)
+  │
+  │   ARM64 路径: float16 中间格式优化带宽 (NEON vcvt_f16_f32)
+  │
   ▼
-[步骤 3] 相机匹配增强 ── applySaturationContrast()
-  │         饱和度 (×1.25) + 对比度 (×1.10)
-  ▼
-[步骤 4] 色域变换 ────── applyGamutTransform()  [可选]
-  │         ProPhoto → 目标色域, 3×3 矩阵 (float32)
-  ▼
-  ├─ ARM64 路径 (float16 带宽优化) ──────────────────────────┐
-  │   [步骤 4b] convertToF16()                                │
-  │   │         float32 → float16 (NEON vcvt_f16_f32)         │
-  │   ▼                                                       │
-  │   [步骤 4c] applyLogEncodingF16()                         │
-  │   │         Log 曲线编码 (float16 I/O, float32 计算)       │
-  │   ▼                                                       │
-  │   [步骤 5]  applyLUT3DF16() (可选)                        │
-  │   │         四面体插值 (float16 I/O, float32 LUT)          │
-  │   ▼                                                       │
-  │   convertToF32() → 恢复 float32                           │
-  │                                                           │
-  └─ 通用路径 (float32) ──────────────────────────────────────┘
-      [步骤 4c] applyLogEncoding()
-      │         Log 曲线编码 (线性 → Log OETF)
-      ▼
-      [步骤 5]  applyLUT3D() (可选)
-                四面体插值 (6-case, 每像素仅读 4 顶点)
+[步骤 6] 图像缩放 (可选) ─ resizeImage()
+  │         等比缩小至目标尺寸 (预览场景)
   ▼
 [输出] 保存 ────── 16-bit TIFF (sRGB ICC) 或 8-bit JPEG (EXIF + sRGB ICC)
 ```
@@ -187,6 +177,8 @@ RawAlchemyCpp/
 │   ├── icc_srgb.h                  #   sRGB IEC61966-2.1 ICC 配置文件 (constexpr)
 │   ├── tiff_writer.h               #   16-bit TIFF 输出接口 (sRGB ICC)
 │   ├── jpeg_writer.h               #   8-bit JPEG 输出接口 (EXIF + sRGB ICC)
+│   ├── grading_fused.h             #   单遍融合调色管线 (gain→sat/cont→gamut→log→LUT)
+│   ├── image_resize.h              #   图像缩放接口 (等比缩小)
 │   ├── raw_alchemy_capi.h          #   C API 接口 (FFI / 共享库)
 │   └── raw_alchemy_export.h        #   平台导出宏 (DLL/SO)
 │
@@ -202,6 +194,8 @@ RawAlchemyCpp/
 │   ├── exif_injector.cpp           #   EXIF 提取 + libexif 序列化 + JPEG APP1 注入
 │   ├── tiff_writer.cpp             #   16-bit TIFF 输出实现 (libtiff + sRGB ICC)
 │   ├── jpeg_writer.cpp             #   8-bit JPEG 输出实现 (libjpeg-turbo + EXIF + sRGB ICC)
+│   ├── grading_fused.cpp           #   单遍融合调色实现 (5步合一, 5x带宽优化)
+│   ├── image_resize.cpp            #   图像缩放实现 (双三次插值)
 │   └── verify.cpp                  #   独立 TIFF 验证工具
 │
 ├── scripts/
@@ -260,6 +254,8 @@ RawAlchemyCpp/
 | `src/lut_applier.cpp` + `include/lut_applier.h` | `utils.py` (`apply_lut_inplace`) + `colour.LUT` | 3D LUT 加载 + 四面体插值 (ARM64: float16 优化版 `applyLUT3DF16`) |
 | `src/tiff_writer.cpp` + `include/tiff_writer.h` | `file_io.py` (TIFF 分支) | 16-bit TIFF 输出 (sRGB ICC 嵌入) |
 | `src/jpeg_writer.cpp` + `include/jpeg_writer.h` | `file_io.py` (JPEG 分支) | 8-bit JPEG 输出 (EXIF 嵌入 + sRGB ICC 嵌入) |
+| `src/grading_fused.cpp` + `include/grading_fused.h` | `core.py` (Steps 2-5 顺序执行) | 单遍融合调色管线 (曝光→饱和/对比度→色域→Log→LUT 合为一次遍历) |
+| `src/image_resize.cpp` + `include/image_resize.h` | (无对应) | 图像等比缩放 (预览场景专用) |
 | `src/exif_injector.cpp` + `include/exif_injector.h` | (无对应) | EXIF 提取 (LibRaw 回调) + libexif 序列化 + JPEG APP1 注入 |
 | `include/icc_srgb.h` | (Pillow 内置) | sRGB IEC61966-2.1 ICC 配置文件 (constexpr, 3144 bytes) |
 | `src/verify.cpp` | (无对应) | 独立 TIFF 统计验证工具 (C++ 独有) |
@@ -271,15 +267,16 @@ RawAlchemyCpp/
 
 ### 说明
 
-- **`core.py` 被拆分**：Python 版的 `core.py` 是单一管线文件，包含全部 6 步处理流程。C++ 版将其拆分为独立模块 (`raw_decoder`, `log_transform`, `lut_applier`, `metering`, `stylize`, `lens_correction`, `exif_injector`)，管线编排由 `main.cpp` 负责。
+- **`core.py` 被拆分**：Python 版的 `core.py` 是单一管线文件，包含全部 6 步处理流程。C++ 版将其拆分为独立模块 (`raw_decoder`, `log_transform`, `lut_applier`, `metering`, `stylize`, `lens_correction`, `exif_injector`)，管线编排由 `main.cpp` 负责。C++ 版还额外提供融合管线 `grading_fused`，将曝光、饱和/对比度、色域变换、Log 编码、LUT 插值合为单遍遍历，内存带宽降低 5 倍。
 - **`utils.py` 被拆分**：Python 版的 `utils.py` 包含所有 Numba 加速核函数（矩阵变换、LUT 插值、增益、饱和度/对比度等）。C++ 版将这些功能分别归入对应的源文件。
 - **`lensfun_wrapper.py` → 直接编译**：Python 版通过 ctypes 动态加载 Lensfun 共享库；C++ 版直接将 Lensfun 源码编译进项目，并自写了 GLib2 兼容 shim 以消除外部 GLib2 依赖。
 - **`config.py` → `color_data.h`**：Python 版在 `config.py` 中定义 log 空间映射，运行时调用 `colour-science` 计算矩阵和曲线。C++ 版通过 `scripts/gen_color_data.py` 离线生成 `color_data.h`，将所有矩阵和曲线嵌入编译产物。
 - **独有的 EXIF 嵌入**：C++ 版通过 LibRaw 的 `exif_parser_callback` 在解码阶段提取 EXIF 标签，然后用 libexif 序列化为 APP1 blob 并注入 JPEG 输出。MakerNote 被丢弃以避免偏移损坏。
 - **独有的 sRGB ICC 嵌入**：C++ 版将标准 sRGB IEC61966-2.1 ICC 配置文件 (3144 bytes) 以 `constexpr` 数组嵌入，同时写入 TIFF 和 JPEG 输出。
-- **无 GUI**：Python 版包含完整的 Tkinter GUI + matplotlib 实时预览。C++ 版仅提供 CLI。
+- **独有的图像缩放**：C++ 版提供 `image_resize` 模块，支持等比缩小，用于预览场景。
+- **无 GUI**：Python 版包含完整的 Tkinter GUI + matplotlib 实时预览。C++ 版仅提供 CLI，但通过 C API Preview Session 支持宿主应用实现实时预览。
 - **无 HEIF 输出**：Python 版支持 10-bit HEIF 输出。C++ 版仅支持 TIFF 和 JPEG。
-- **独有的 C API**：C++ 版提供 C 语言 FFI 接口 (`raw_alchemy_capi.h`)，支持构建为共享库 (DLL/SO) 供其他语言调用。
+- **独有的 C API**：C++ 版提供 C 语言 FFI 接口 (`raw_alchemy_capi.h`)，支持构建为共享库 (DLL/SO) 供其他语言调用，包含两阶段 Preview Session API。
 - **独有的交叉验证**：C++ 版包含一组 Python 交叉验证脚本，逐步对比 C++ 输出与 Python (rawpy + colour-science) 参考输出，确保移植精度。
 
 ---
@@ -467,8 +464,7 @@ RaResult result = raProcessFile(
     "F-Log2C",                                                 // Log 空间 (NULL = 跳过)
     "FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube",               // LUT 文件 (NULL = 跳过)
     "matrix",                                                  // 测光模式 (NULL = 默认 matrix)
-    0.0f,                                                      // manualEv (useAutoExposure≠0 时忽略)
-    1,                                                         // useAutoExposure (非0 = 自动)
+    0.0f,                                                      // evOffset (曝光偏移，叠加在自动测光之上)
     95,                                                        // JPEG 质量 (1-100)
     1,                                                         // 启用镜头校正
     NULL                                                       // 自定义 Lensfun DB (NULL = 系统默认)
@@ -494,7 +490,7 @@ RaResult result = raProcessFileWithLUT(
     "F-Log2C",
     myLutTable, 65,                    // LUT 数据 + 维度
     domainMin, domainMax,              // LUT 域范围 (NULL = 默认 [0,1])
-    "matrix", 0.0f, 1,                // 测光 + 曝光
+    "matrix", 0.0f,                    // 测光 + 曝光偏移
     95,                                // JPEG 质量
     1, NULL                            // 镜头校正 + Lensfun DB
 );
@@ -508,7 +504,7 @@ RaResult result = raProcessToBuffer(
     "Sample.NEF", "F-Log2C",
     "FLog2C_to_CLASSIC-Neg._65grid_V.1.00.cube",
     "matrix",
-    0.0f, 1, 1, NULL, &buf
+    0.0f, 1, NULL, &buf
 );
 
 if (result == RA_OK) {
@@ -526,6 +522,45 @@ if (result == RA_OK) {
 ```c
 const char* err = raGetLastError();    // 获取最近错误信息 (线程局部)
 const char* ver = raGetVersion();      // 获取库版本号 (如 "0.1.0")
+```
+
+### 预览会话 (Preview Session)
+
+两阶段预览管线：解码+镜头校正执行一次，随后可快速重调色（不同 LUT/曝光参数）。适用于实时预览场景。
+
+```c
+// 1. 创建预览会话（解码 + 镜头校正，缓存结果）
+RaPreviewSession session = NULL;
+raBeginPreviewSession(
+    "Sample.NEF",        // 输入 RAW 文件
+    1,                   // 启用镜头校正
+    NULL,                // 自定义 Lensfun DB (NULL = 系统默认)
+    1,                   // halfSize (半尺寸快速解码)
+    1920, 1080,          // 预览最大尺寸 (0 = 不缩放)
+    &session
+);
+
+// 2. 快速调色（基于缓存，不重复解码）
+unsigned char* jpegBuf = NULL;
+int jpegLen = 0;
+raApplyPreviewGrading(
+    session,
+    "F-Log2C",           // Log 空间
+    lutTable, 65,        // 预加载的 LUT (NULL = 跳过)
+    NULL, NULL,          // LUT 域范围
+    "matrix",            // 测光模式
+    0.0f,                // 曝光偏移
+    85,                  // JPEG 质量
+    0, 0,                // 输出最大尺寸 (0 = 不缩放)
+    &jpegBuf, &jpegLen
+);
+/* ... 使用 jpegBuf (JPEG 数据) ... */
+raFreePreviewBuffer(jpegBuf);
+
+// 3. 可再次调用 raApplyPreviewGrading 尝试不同参数
+
+// 4. 结束会话
+raEndPreviewSession(session);
 ```
 
 ### 错误码

@@ -82,8 +82,7 @@ RA_API int RA_CALL raImageGetDataSizeBytes(RaImageBuffer buf);
  *  @param logSpace    Log space name, or NULL to skip log transform.
  *  @param lutPath     Path to .cube LUT file, or NULL to skip LUT.
  *  @param metering    Metering mode, or NULL for "matrix".
- *  @param manualEv    Manual exposure in stops. Ignored if useAutoExposure != 0.
- *  @param useAutoExposure  If non-zero, use auto metering; else use manualEv.
+ *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param jpegQuality JPEG quality 1-100 (only used for JPEG output).
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
@@ -94,8 +93,7 @@ RA_API RaResult RA_CALL raProcessFile(
     const char* logSpace,
     const char* lutPath,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
     const char* customLensfunDb
@@ -117,8 +115,7 @@ RA_API RaResult RA_CALL raProcessFile(
  *  @param lutDomainMin  LUT domain minimum [R, G, B]. Pass NULL for default {0,0,0}.
  *  @param lutDomainMax  LUT domain maximum [R, G, B]. Pass NULL for default {1,1,1}.
  *  @param metering    Metering mode, or NULL for "matrix".
- *  @param manualEv    Manual exposure in stops.
- *  @param useAutoExposure  If non-zero, use auto metering.
+ *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param jpegQuality JPEG quality 1-100.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
@@ -132,8 +129,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     const float* lutDomainMin,
     const float* lutDomainMax,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
     const char* customLensfunDb
@@ -148,8 +144,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
  *  @param logSpace    Log space name, or NULL to skip.
  *  @param lutPath     Path to .cube LUT, or NULL to skip.
  *  @param metering    Metering mode, or NULL for "matrix".
- *  @param manualEv    Manual exposure. Ignored if useAutoExposure != 0.
- *  @param useAutoExposure  If non-zero, use auto metering.
+ *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
  *  @param outBuf      Receives the processed image. Caller must destroy.
@@ -159,12 +154,90 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     const char* logSpace,
     const char* lutPath,
     const char* metering,
-    float       manualEv,
-    int         useAutoExposure,
+    float       evOffset,
     int         enableLensCorrection,
     const char* customLensfunDb,
     RaImageBuffer* outBuf
 );
+
+/* ----------------------------------------------------------------
+ *  Preview Session — two-phase preview pipeline
+ *
+ *  Decodes RAW + applies lens correction once, then allows fast
+ *  re-grading with different LUT/exposure parameters.
+ * ---------------------------------------------------------------- */
+typedef struct RaPreviewSession_* RaPreviewSession;
+
+/** Decode a RAW file and apply lens correction, caching the result for
+ *  fast re-grading.  Call raEndPreviewSession when done.
+ *
+ *  @param inputPath             UTF-8 path to input RAW file.
+ *  @param enableLensCorrection  If non-zero, apply lens correction.
+ *  @param customLensfunDb       Custom Lensfun DB path, or NULL.
+ *  @param halfSize              If non-zero, use LibRaw half-size demosaic
+ *                               (faster, lower resolution).
+ *  @param maxPreviewWidth       Max width after lens correction (0 = no resize).
+ *  @param maxPreviewHeight      Max height after lens correction (0 = no resize).
+ *  @param outSession            Receives the session handle.
+ *  @return RA_OK on success. */
+RA_API RaResult RA_CALL raBeginPreviewSession(
+    const char* inputPath,
+    int         enableLensCorrection,
+    const char* customLensfunDb,
+    int         halfSize,
+    int         maxPreviewWidth,
+    int         maxPreviewHeight,
+    RaPreviewSession* outSession
+);
+
+/** Apply grading parameters to the session's cached decoded image.
+ *
+ *  The session's internal data is NOT modified — safe to call repeatedly
+ *  with different parameters.  Internally clones the cached buffer, applies
+ *  the full grading pipeline, resizes to fit maxWidth×maxHeight, and JPEG-encodes
+ *  to memory.
+ *
+ *  Buffer is allocated internally and must be freed by the caller with raFreePreviewBuffer.
+ *
+ *  Pipeline on cloned data:
+ *    Exposure -> Sat/Contrast Boost -> Log Transform -> LUT -> Resize -> JPEG encode
+ *
+ *  @param session         Active preview session.
+ *  @param logSpace        Log space name, or NULL to skip.
+ *  @param lutTable        Pre-parsed LUT float data [size^3 x 3], or NULL.
+ *  @param lutSize         LUT dimension. Ignored if lutTable is NULL.
+ *  @param lutDomainMin    LUT domain min [R,G,B], or NULL for {0,0,0}.
+ *  @param lutDomainMax    LUT domain max [R,G,B], or NULL for {1,1,1}.
+ *  @param metering        Metering mode, or NULL for "matrix".
+ *  @param evOffset        Exposure offset in stops.
+ *  @param jpegQuality     JPEG quality 1-100.
+ *  @param maxWidth        Max output width (0 = keep original resolution).
+ *  @param maxHeight       Max output height (0 = keep original resolution).
+ *  @param outBuffer       Receives JPEG data (caller must free via raFreePreviewBuffer).
+ *  @param outLen          Receives JPEG data length.
+ *  @return RA_OK on success. */
+RA_API RaResult RA_CALL raApplyPreviewGrading(
+    RaPreviewSession session,
+    const char*      logSpace,
+    const float*     lutTable,
+    int              lutSize,
+    const float*     lutDomainMin,
+    const float*     lutDomainMax,
+    const char*      metering,
+    float            evOffset,
+    int              jpegQuality,
+    int              maxWidth,
+    int              maxHeight,
+    unsigned char**  outBuffer,
+    int*             outLen
+);
+
+/** Free a buffer allocated by raApplyPreviewGrading. Safe to pass NULL. */
+RA_API void RA_CALL raFreePreviewBuffer(unsigned char* buffer);
+
+/** End a preview session and release all cached resources.
+ *  Safe to pass NULL (no-op). */
+RA_API void RA_CALL raEndPreviewSession(RaPreviewSession session);
 
 /* ----------------------------------------------------------------
  *  Utility

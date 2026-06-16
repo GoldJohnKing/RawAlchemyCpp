@@ -32,6 +32,21 @@
 #include <stdexcept>  // std::runtime_error (MSVC doesn't pull it in transitively)
 #include <string>     // std::string / std::to_string
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+namespace {
+    std::wstring utf8_to_wide(const std::string& utf8) {
+        if (utf8.empty()) return std::wstring();
+        int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+        if (size <= 0) return std::wstring();
+        std::wstring wide(static_cast<size_t>(size - 1), 0);
+        MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], size);
+        return wide;
+    }
+}
+#endif
+
 namespace rawalchemy {
 
 // ---- Error helper ----
@@ -42,11 +57,30 @@ static void throwLibRawError(int ret, const char* context) {
     );
 }
 
+// ---- LibRaw upstream bug workaround ----
+// When wavelet denoising is enabled (threshold > 0), LibRaw sets shrink=1 and
+// halves iheight/iwidth. After wavelet_denoise(), pre_interpolate() upscales
+// the buffer to full size and sets shrink=0, but NEVER updates iheight/iwidth.
+// DHT (quality=11) and AAHD (quality=12) use iheight/iwidth for buffer indexing,
+// causing them to process only the top-left quarter of the image.
+// Inspired by RawTherapee's integration-layer workaround (rtengine/rawimage.cc).
+static void fixPreInterpolateDimensions(void* ctx) {
+    LibRaw* raw = static_cast<LibRaw*>(ctx);
+    raw->imgdata.sizes.iheight = raw->imgdata.sizes.height;
+    raw->imgdata.sizes.iwidth = raw->imgdata.sizes.width;
+}
+
+// LibRaw::callbacks is protected — expose via subclass.
+class LibRawAccessor : public LibRaw {
+public:
+    using LibRaw::callbacks;
+};
+
 // ---- decodeRaw ----
 ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
                        ExifCollector* exifCollector) {
     // Create LibRaw processor
-    LibRaw rawProcessor;
+    LibRawAccessor rawProcessor;
 
     // --- Configure decoding parameters ---
     auto& p = rawProcessor.imgdata.params;
@@ -85,6 +119,20 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         p.half_size = 1;
     }
 
+    // Green channel matching (G1/G3 equalization)
+    p.green_matching = params.greenMatching ? 1 : 0;
+
+    // Mix green: average G1/G3 into single channel, forces P1.colors=3.
+    // Without this, some sensors output 4-channel RGBG which breaks
+    // non-AHD demosaic algorithms (DHT, AAHD).
+    // rawProcessor.imgdata.rawdata.ioparams.mix_green = 1;
+
+    // Median filter passes (post-demosaic, chroma only)
+    p.med_passes = params.medPasses;
+
+    // Pre-demosaic noise reduction (FBDD)
+    p.fbdd_noiserd = params.fbddNoiserd;
+
     // Set EXIF callback before open_file if collector provided
     if (exifCollector) {
         rawProcessor.set_exifparser_handler(
@@ -92,7 +140,12 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     // --- Open the RAW file ---
+#ifdef _WIN32
+    auto widePath = utf8_to_wide(rawPath);
+    int ret = rawProcessor.open_file(widePath.c_str());
+#else
     int ret = rawProcessor.open_file(rawPath.c_str());
+#endif
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "open_file");
     }
@@ -102,6 +155,49 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "unpack");
     }
+
+    // --- ISO-adaptive noise reduction ---
+    float iso = rawProcessor.imgdata.other.iso_speed;
+
+    if (params.denoiseThreshold < 0.0f) {
+        if (iso <= 100.0f) {
+            // Base ISO — sensor noise floor is negligible
+            p.threshold = 0;
+        } else if (iso <= 400.0f) {
+            // Low ISO — minimal fixed denoise
+            p.threshold = 100;
+        } else {
+            // ISO 400–12800+: log2-scale mapping to 200–1000
+            // ISO is logarithmic (each doubling = same noise increase),
+            // so threshold should scale with log2(ISO).
+            float logLow = 8.644f;   // log2(400)
+            float logHigh = 13.644f; // log2(12800)
+            float t = (log2f(iso) - logLow) / (logHigh - logLow);
+            p.threshold = 100.0f + std::min(std::max(t, 0.0f), 1.0f) * 900.0f;
+        }
+    } else {
+        p.threshold = params.denoiseThreshold;
+    }
+
+    if (params.fbddNoiserd < 0) {
+        if (iso <= 100.0f) {
+            // Disable FBDD for base ISO (sensor data is clean)
+            p.fbdd_noiserd = 0;
+        } else if (iso < 3200.0f) {
+            // Low ISO — minimal fixed denoise
+            p.fbdd_noiserd = 1;
+        } else {
+            // ISO-adaptive FBDD: upgrade to full mode for high-ISO images
+            p.fbdd_noiserd = 2;
+        }
+    } else {
+        p.fbdd_noiserd = params.fbddNoiserd;
+    }
+
+    // Register workaround for LibRaw iheight/iwidth bug (see fixPreInterpolateDimensions).
+    // This callback runs after pre_interpolate() but before demosaic, ensuring
+    // iheight/iwidth match the actual buffer dimensions.
+    rawProcessor.callbacks.pre_interpolate_cb = fixPreInterpolateDimensions;
 
     // --- Process (demosaic + color conversion + gamma) ---
     ret = rawProcessor.dcraw_process();
@@ -288,7 +384,12 @@ CameraMetadata extractMetadata(const std::string& rawPath) {
     CameraMetadata meta;
     LibRaw rawProcessor;
 
+#ifdef _WIN32
+    auto widePath = utf8_to_wide(rawPath);
+    int ret = rawProcessor.open_file(widePath.c_str());
+#else
     int ret = rawProcessor.open_file(rawPath.c_str());
+#endif
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "open_file (metadata)");
     }

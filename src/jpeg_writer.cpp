@@ -18,6 +18,11 @@
 #include <vector>
 #include <algorithm>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 #include <turbojpeg.h>
 
 namespace rawalchemy {
@@ -96,6 +101,8 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
     const uint8_t* writeData;
     size_t writeSize;
 
+    FILE* fp = nullptr;
+
     if (exifData && !exifData->empty()) {
         finalJpeg = rawalchemy::injectExifIntoJpeg(jpegBuf, jpegSize, *exifData);
         writeData = finalJpeg.data();
@@ -105,7 +112,16 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
         writeSize = jpegSize;
     }
 
-    FILE* fp = fopen(outPath.c_str(), "wb");
+#ifdef _WIN32
+    {
+        int size = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
+        std::wstring wpath(static_cast<size_t>(size - 1), 0);
+        MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], size);
+        fp = _wfopen(wpath.c_str(), L"wb");
+    }
+#else
+    fp = fopen(outPath.c_str(), "wb");
+#endif
     if (!fp) {
         fprintf(stderr, "[JpegWriter] Failed to open output file: %s\n", outPath.c_str());
         tj3Free(jpegBuf);
@@ -125,6 +141,53 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
     }
 
     return true;
+}
+
+std::vector<uint8_t> writeJpegToBuffer(const ImageBuffer& img,
+                                       int quality, bool optimize,
+                                       const std::vector<uint8_t>* exifData) {
+    if (img.width <= 0 || img.height <= 0 || img.data.empty()) {
+        return {};
+    }
+    quality = std::max(1, std::min(quality, 100));
+
+    const int w = img.width;
+    const int h = img.height;
+    std::vector<uint8_t> pixels(static_cast<size_t>(w) * h * 3);
+    const float* src = img.data.data();
+    uint8_t* dstP = pixels.data();
+    for (size_t i = 0; i < pixels.size(); ++i) {
+        float v = src[i];
+        if (v < 0.0f) v = 0.0f; else if (v > 1.0f) v = 1.0f;
+        dstP[i] = static_cast<uint8_t>(v * 255.0f + 0.5f);
+    }
+
+    tjhandle compressor = tj3Init(TJINIT_COMPRESS);
+    if (!compressor) return {};
+    tj3Set(compressor, TJPARAM_QUALITY, quality);
+    tj3Set(compressor, TJPARAM_SUBSAMP, TJSAMP_444);
+    tj3Set(compressor, TJPARAM_FASTDCT, 1);  // fast DCT for preview speed
+    if (optimize) tj3Set(compressor, TJPARAM_OPTIMIZE, 1);
+    tj3SetICCProfile(compressor, const_cast<unsigned char*>(SRGB_ICC_PROFILE), SRGB_ICC_PROFILE_SIZE);
+
+    unsigned char* jpegBuf = nullptr;
+    size_t jpegSize = 0;
+    int result = tj3Compress8(compressor, pixels.data(), w, w * 3, h, TJPF_RGB, &jpegBuf, &jpegSize);
+    if (result != 0) {
+        tj3Destroy(compressor);
+        return {};
+    }
+
+    std::vector<uint8_t> output;
+    if (exifData && !exifData->empty()) {
+        output = rawalchemy::injectExifIntoJpeg(jpegBuf, jpegSize, *exifData);
+    } else {
+        output.assign(jpegBuf, jpegBuf + jpegSize);
+    }
+
+    tj3Free(jpegBuf);
+    tj3Destroy(compressor);
+    return output;
 }
 
 } // namespace rawalchemy

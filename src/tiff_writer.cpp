@@ -20,6 +20,11 @@
 #include <vector>
 #include <algorithm>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace rawalchemy {
 
 // ---- Suppress libtiff warnings during compression probing ----
@@ -105,7 +110,17 @@ bool writeTiff16(const ImageBuffer& img, const std::string& outPath) {
     pushSilentWarnings();
 
     // Open TIFF for writing
-    TIFF* tif = TIFFOpen(outPath.c_str(), "w");
+    TIFF* tif = nullptr;
+#ifdef _WIN32
+    {
+        int sz = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
+        std::wstring wpath(static_cast<size_t>(sz - 1), 0);
+        MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], sz);
+        tif = TIFFOpenW(wpath.c_str(), "w");
+    }
+#else
+    tif = TIFFOpen(outPath.c_str(), "w");
+#endif
     if (!tif) {
         popSilentWarnings();
         fprintf(stderr, "[TiffWriter] Cannot open output file: %s\n", outPath.c_str());
@@ -137,7 +152,17 @@ bool writeTiff16(const ImageBuffer& img, const std::string& outPath) {
         closer.tif = nullptr;
 
         // Reopen
+        tif = nullptr;
+#ifdef _WIN32
+        {
+            int sz = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
+            std::wstring wpath(static_cast<size_t>(sz - 1), 0);
+            MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], sz);
+            tif = TIFFOpenW(wpath.c_str(), "w");
+        }
+#else
         tif = TIFFOpen(outPath.c_str(), "w");
+#endif
         if (!tif) {
             fprintf(stderr, "[TiffWriter] Cannot reopen output file for uncompressed write\n");
             return false;
@@ -165,7 +190,17 @@ bool writeTiff16Uncompressed(const ImageBuffer& img, const std::string& outPath)
 
     auto buf16 = floatToUint16(img);
 
-    TIFF* tif = TIFFOpen(outPath.c_str(), "w");
+    TIFF* tif = nullptr;
+#ifdef _WIN32
+    {
+        int sz = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
+        std::wstring wpath(static_cast<size_t>(sz - 1), 0);
+        MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], sz);
+        tif = TIFFOpenW(wpath.c_str(), "w");
+    }
+#else
+    tif = TIFFOpen(outPath.c_str(), "w");
+#endif
     if (!tif) return false;
     TiffCloser closer(tif);
 
