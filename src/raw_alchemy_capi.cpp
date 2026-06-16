@@ -18,6 +18,7 @@
 
 #include <libraw/libraw.h>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <stdexcept>
 
@@ -348,9 +349,13 @@ RA_API RaResult RA_CALL raProcessFile(
         bool isJpeg = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
                       (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
 
-        // Create EXIF collector for JPEG output
-        rawalchemy::ExifCollector* exifCollector = isJpeg
-            ? rawalchemy::createExifCollector() : nullptr;
+        // Create EXIF collector for JPEG output. Scope-guarded so ANY exit
+        // (success, runPipeline failure, or an exception thrown by
+        // buildExifBlob/writeJpeg/writeTiff16) frees the collector.
+        auto exifGuard = std::unique_ptr<rawalchemy::ExifCollector, void(*)(rawalchemy::ExifCollector*)>(
+            isJpeg ? rawalchemy::createExifCollector() : nullptr,
+            [](rawalchemy::ExifCollector* p) { if (p) rawalchemy::destroyExifCollector(p); });
+        rawalchemy::ExifCollector* exifCollector = exifGuard.get();
 
         // Probe sensor type first (extractMetadata is a metadata-only open_file,
         // cheap — no unpack/dcraw_process). Route non-CFA/Foveon sensors to
@@ -366,7 +371,6 @@ RA_API RaResult RA_CALL raProcessFile(
                                    evOffset,
                                    enableLensCorrection, customLensfunDb);
         if (res != RA_OK) {
-            if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
             return res;
         }
 
@@ -381,8 +385,6 @@ RA_API RaResult RA_CALL raProcessFile(
         } else {
             ok = rawalchemy::writeTiff16(img, std::string(outputPath));
         }
-
-        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
 
         if (!ok) {
             setError("Failed to write output file");
@@ -421,9 +423,13 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         bool isJpeg = (ext.size() >= 4 && ext.compare(ext.size()-4, 4, ".jpg") == 0) ||
                       (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
 
-        // Create EXIF collector for JPEG output
-        rawalchemy::ExifCollector* exifCollector = isJpeg
-            ? rawalchemy::createExifCollector() : nullptr;
+        // Create EXIF collector for JPEG output. Scope-guarded so ANY exit
+        // (success, runPipeline failure, or an exception thrown by
+        // buildExifBlob/writeJpeg/writeTiff16) frees the collector.
+        auto exifGuard = std::unique_ptr<rawalchemy::ExifCollector, void(*)(rawalchemy::ExifCollector*)>(
+            isJpeg ? rawalchemy::createExifCollector() : nullptr,
+            [](rawalchemy::ExifCollector* p) { if (p) rawalchemy::destroyExifCollector(p); });
+        rawalchemy::ExifCollector* exifCollector = exifGuard.get();
 
         // Probe sensor type first; route non-CFA/Foveon to dcraw, else custom.
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
@@ -454,7 +460,6 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
                                    evOffset,
                                    enableLensCorrection, customLensfunDb);
         if (res != RA_OK) {
-            if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
             return res;
         }
 
@@ -469,8 +474,6 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         } else {
             ok = rawalchemy::writeTiff16(img, std::string(outputPath));
         }
-
-        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
 
         if (!ok) {
             setError("Failed to write output file");

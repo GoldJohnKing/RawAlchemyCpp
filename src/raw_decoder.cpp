@@ -57,6 +57,19 @@ static void throwLibRawError(int ret, const char* context) {
     );
 }
 
+// ---- Wide-path open helper (DRY) ----
+// Open a RAW file with Windows UTF-8→wide-path support so non-ASCII paths
+// work via the FFI on Windows. On other platforms this is a plain open_file.
+// Used by decodeRaw, decodeRawMosaic, and extractMetadata.
+static int openRawFile(LibRaw& p, const std::string& path) {
+#ifdef _WIN32
+    auto widePath = utf8_to_wide(path);
+    return p.open_file(widePath.c_str());
+#else
+    return p.open_file(path.c_str());
+#endif
+}
+
 // ---- LibRaw upstream bug workaround ----
 // When wavelet denoising is enabled (threshold > 0), LibRaw sets shrink=1 and
 // halves iheight/iwidth. After wavelet_denoise(), pre_interpolate() upscales
@@ -140,12 +153,7 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     // --- Open the RAW file ---
-#ifdef _WIN32
-    auto widePath = utf8_to_wide(rawPath);
-    int ret = rawProcessor.open_file(widePath.c_str());
-#else
-    int ret = rawProcessor.open_file(rawPath.c_str());
-#endif
+    int ret = openRawFile(rawProcessor, rawPath);
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "open_file");
     }
@@ -296,7 +304,7 @@ RawMosaic decodeRawMosaic(const std::string& rawPath, ExifCollector* exifCollect
     }
 
     // --- Open + unpack only (do NOT call dcraw_process) ---
-    int ret = rawProcessor.open_file(rawPath.c_str());
+    int ret = openRawFile(rawProcessor, rawPath);
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "open_file (mosaic)");
     }
@@ -384,12 +392,7 @@ CameraMetadata extractMetadata(const std::string& rawPath) {
     CameraMetadata meta;
     LibRaw rawProcessor;
 
-#ifdef _WIN32
-    auto widePath = utf8_to_wide(rawPath);
-    int ret = rawProcessor.open_file(widePath.c_str());
-#else
-    int ret = rawProcessor.open_file(rawPath.c_str());
-#endif
+    int ret = openRawFile(rawProcessor, rawPath);
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "open_file (metadata)");
     }

@@ -216,7 +216,7 @@ HlRefavg computeHlRefavg(const RawMosaic& m, const uint8_t* color_map,
                 if (cnt[c] > 0.0f) {
                     const float arg = wb_gains[c] * mean[c] / cnt[c];
                     cbrt_mean[c] = (arg > 0.0f)
-                        ? powf(arg, 1.0f / 3.0f)
+                        ? std::cbrtf(arg)
                         : 0.0f;
                 }
             }
