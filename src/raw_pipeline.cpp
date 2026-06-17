@@ -3,25 +3,27 @@
  * @brief Shared custom CPU demosaic pipeline (Phases 1-5) — used by BOTH the
  *        CLI (src/main.cpp) and the C API (src/raw_alchemy_capi.cpp).
  *
- * Single source of truth for the custom RAW decode. The pipeline now REUSES
+ * Single source of truth for the custom RAW decode. The pipeline reuses
  * LibRaw's OWN compiled denoise stages (green_matching + wavelet + FBDD +
  * post-demosaic chroma median) via the DenoiseLibRaw subclass, restoring the
  * color-noise control the old dcraw_process path had but the hand-rolled
  * custom path had dropped.
  *
- * Stage order:
- *   open -> unpack -> raw2image_ex -> subtract_black_internal ->
- *   adjust_maximum -> [green_matching -> scale_colors(WB+wavelet) -> fbdd] ->
- *   extract denoised CFA mosaic -> fixHotPixels -> highlightInpaintOpposed ->
- *   (rcdDemosaic | xtransMarkesteijnDemosaic) ->
+ * DECOUPLED pipeline (ora-1): WB and denoise are kept separate so the green-
+ * anchored applyWhiteBalance (not LibRaw's max-anchored scale_colors) controls
+ * white balance. scale_colors is NOT called. Stage order:
+ *   open -> unpack -> raw2image_ex(1) [inline black subtract] ->
+ *   green_matching -> [set green-anchored pre_mul] ->
+ *   [ISO-adaptive threshold -> wavelet_denoise] -> [fbdd (Bayer only)] ->
+ *   extract denoised CFA mosaic (normalize by post-wavelet maximum) ->
+ *   fixHotPixels -> highlightInpaintOpposed ->
+ *   (rcdDemosaic | xtransMarkesteijnDemosaic) -> applyWhiteBalance ->
  *   median_filter (post-demosaic chroma median) ->
  *   applyFlip -> cameraToProphotoMatrix -> applyColorMatrix -> clamp [0,1].
  *
- * LibRaw's subtract_black_internal + scale_colors replace the custom
- * subtractBlackLevel + applyWhiteBalance (skipped here). If any LibRaw denoise
- * stage throws, the function falls back to the proven non-denoised custom
- * pipeline (decodeRawMosaic -> ... -> applyWhiteBalance) so callers always get
- * valid output.
+ * If any LibRaw denoise stage throws, the function falls back to the proven
+ * non-denoised custom pipeline (decodeRawMosaic -> ... -> applyWhiteBalance)
+ * so callers always get valid output.
  */
 
 #include "raw_pipeline.h"
@@ -108,19 +110,25 @@ ImageBuffer decodeCustomPipelineNoDenoise(const std::string& inputPath) {
 //             decodeImageWithCustomPipeline
 // ============================================================
 //
-// Owns a single DenoiseLibRaw instance across the WHOLE flow so the LibRaw
-// denoise stages (which mutate imgdata.image in place) run on the same buffer
-// the mosaic is later extracted from, and the post-demosaic median_filter can
-// round-trip through the same imgdata.image.
+// Decoupled LibRaw denoise + custom WB. Owns a single DenoiseLibRaw across
+// the whole flow so the LibRaw denoise stages (which mutate imgdata.image in
+// place) run on the same buffer the mosaic is later extracted from, and the
+// post-demosaic median_filter can round-trip through the same imgdata.image.
+//
+// WB is NOT delegated to LibRaw's scale_colors (which is max-anchored and
+// crushes green -> magenta cast). Instead the green-anchored applyWhiteBalance
+// runs after demosaic, exactly like the non-denoised custom path. The LibRaw
+// denoise stages that have NO WB dependency (green_matching, wavelet_denoise,
+// fbdd, median_filter) are called directly.
 ImageBuffer decodeImageWithCustomPipeline(
     const std::string& inputPath,
     ExifCollector* exifCollector) {
     try {
         DenoiseLibRaw rawProcessor;
 
-        // EXIF callback must be wired before open_file (same pattern as
-        // decodeRaw / decodeRawMosaic). Single collection — JPEG output keeps
-        // EXIF. The fallback path re-opens with nullptr so tags are not duped.
+        // EXIF callback before open (same pattern as decodeRaw / decodeRawMosaic).
+        // Single collection — JPEG output keeps EXIF. The fallback path re-opens
+        // with nullptr so tags are not duplicated.
         if (exifCollector) {
             rawProcessor.set_exifparser_handler(getExifCallback(), exifCollector);
         }
@@ -131,90 +139,88 @@ ImageBuffer decodeImageWithCustomPipeline(
         ret = rawProcessor.unpack();
         if (ret != LIBRAW_SUCCESS) throwLibRawError(ret, "unpack");
 
-        // Non-CFA sensors have no raw_image — bail to the caller's routing
-        // (decodeRaw/dcraw). Mirrors decodeRawMosaic's guard.
+        // Non-CFA sensors have no raw_image — bail to the caller's routing.
         if (rawProcessor.imgdata.rawdata.raw_image == nullptr) {
             throw std::runtime_error(
                 "[CustomPipeline] non-CFA sensor; use dcraw_process path");
         }
 
-        // IMPORTANT: keep params.threshold == 0 during raw2image_ex. LibRaw
-        // sets IO.shrink=1 (halving iheight/iwidth) when threshold != 0
-        // (raw2image.cpp:49-56). Since this pipeline does NOT call
-        // pre_interpolate() (which would upsample back), shrink would leave a
-        // half-size mosaic. We set the ISO-adaptive threshold AFTER
-        // raw2image_ex so the buffer stays full-size; wavelet_denoise (called
-        // inside scale_colors) then runs on the full-size image.
+        // Step 1: raw2image_ex(1) — populate imgdata.image WITH inline black
+        // subtraction. do_subtract_black=1 correctly:
+        //   - copies rawdata.raw_image -> imgdata.image (4ch per pixel)
+        //   - subtracts black per-channel
+        //   - zeroes imgdata.color.black and cblack[]
+        //   - adjusts imgdata.color.maximum (maximum -= black)
+        // CRITICAL: threshold MUST be 0 here, else IO.shrink=1 -> half res.
         rawProcessor.imgdata.params.threshold = 0;
         rawProcessor.imgdata.params.half_size = 0;
-
-        ret = rawProcessor.raw2image_ex(0);  // allocate imgdata.image, copy raw
+        ret = rawProcessor.raw2image_ex(1);
         if (ret != LIBRAW_SUCCESS) throwLibRawError(ret, "raw2image_ex");
 
-        // Black subtraction + white-point refinement (matches dcraw_process
-        // ordering: subtract_black_internal -> adjust_maximum).
-        ret = rawProcessor.subtract_black_internal();
-        if (ret != LIBRAW_SUCCESS) throwLibRawError(ret, "subtract_black_internal");
-        rawProcessor.adjust_maximum();
+        // Step 2: green_matching (G1/G3 equalization — no WB dependency).
+        rawProcessor.green_matching();
 
-        // --- ISO-adaptive denoise thresholds ---
-        // Mirrors decodeRaw()'s mapping (raw_decoder.cpp:167-202) so the custom
-        // path gets the same denoise strength as the old dcraw path.
+        // Step 3: set green-anchored pre_mul. wavelet_denoise uses only the
+        // RATIO pre_mul[1]/pre_mul[3] for its G1/G3 pull-together (= 1.0 for
+        // standard Bayer where cam_mul[1]==cam_mul[3]); green-anchored is the
+        // conceptually correct value and harmless otherwise.
+        {
+            float* cm = rawProcessor.imgdata.color.cam_mul;
+            float g = (cm[1] > 1e-6f) ? cm[1] : 1.0f;
+            for (int c = 0; c < 4; c++)
+                rawProcessor.imgdata.color.pre_mul[c] = cm[c] / g;
+        }
+
+        // Step 4: ISO-adaptive threshold (MUST be after raw2image_ex to avoid
+        // the IO.shrink half-resolution bug). Mirrors decodeRaw()'s mapping.
         const float iso = rawProcessor.imgdata.other.iso_speed;
         auto& params = rawProcessor.imgdata.params;
-
         if (iso <= 100.0f) {
-            params.threshold = 0;          // base ISO — sensor noise floor negligible
+            params.threshold = 0;
         } else if (iso <= 400.0f) {
-            params.threshold = 100;        // low ISO — minimal fixed wavelet denoise
+            params.threshold = 100;
         } else {
-            // ISO 400-12800+: log2-scale mapping to 100-1000.
-            const float logLow  = 8.644f;   // log2(400)
-            const float logHigh = 13.644f;  // log2(12800)
-            const float t = (std::log2(iso) - logLow) / (logHigh - logLow);
+            const float t = (std::log2(iso) - 8.644f) / (13.644f - 8.644f);
             params.threshold = 100.0f + std::min(std::max(t, 0.0f), 1.0f) * 900.0f;
         }
 
-        int fbddMode;
-        if (iso <= 100.0f) {
-            fbddMode = 0;
-        } else if (iso < 3200.0f) {
-            fbddMode = 1;
-        } else {
-            fbddMode = 2;
+        // Step 5: wavelet_denoise (directly — NOT inside scale_colors).
+        // Operates on imgdata.image in-place. Side effect: image values AND
+        // maximum are left-shifted by `scale` bits (both shift equally, so
+        // image/maximum still yields the correct [0,1] normalization).
+        if (params.threshold > 0.0f) {
+            rawProcessor.wavelet_denoise();
         }
-        params.fbdd_noiserd = fbddMode;
 
-        // scale_colors() uses a MAX-ANCHORED WB normalization
-        // (pre_mul = cam_mul / max(cam_mul)), which crushes the green channel
-        // relative to the custom pipeline's GREEN-ANCHORED applyWhiteBalance.
-        // This causes a systematic magenta/pink cast. FIX: skip scale_colors
-        // (and wavelet_denoise which runs inside it); apply WB via the custom
-        // green-anchored applyWhiteBalance downstream instead.
-        // green_matching + median_filter have no WB dependency and are safe.
-        params.green_matching = 1;
-        params.med_passes = 2;
+        // Step 6: FBDD chroma denoise (Bayer only: filters > 1000). No WB
+        // dependency; operates on imgdata.image in-place. fbdd partially
+        // demosaics (fills non-CFA channels) — extraction reads ONLY the
+        // CFA-active channel, so the partial demosaic is harmless.
+        int fbddLevel = 0;
+        if (iso <= 100.0f) fbddLevel = 0;
+        else if (iso < 3200.0f) fbddLevel = 1;
+        else fbddLevel = 2;
+        const unsigned filters = rawProcessor.imgdata.idata.filters;
+        if (fbddLevel > 0 && filters > 1000) {
+            rawProcessor.fbdd(fbddLevel);
+        }
 
-        // --- Pre-demosaic: green_matching only (no scale_colors / wavelet / fbdd) ---
-        rawProcessor.green_matching();
-
-        // --- Extract denoised CFA mosaic from imgdata.image ---
-        // After raw2image_ex (shrink=0) + subtract_black_internal +
-        // green_matching, imgdata.image is ushort[iheight*iwidth][4] holding
-        // the visible region. Each pixel has ONLY its CFA-active channel
-        // populated (pre-demosaic, pre-WB). scale_colors was NOT called, so the
-        // values are raw sensor values (post-black-subtraction, NOT WB-scaled).
-        // Normalize by imgdata.color.maximum (the white point) to get [0,1].
-        const float whitePoint = static_cast<float>(rawProcessor.imgdata.color.maximum);
-        const float normDiv = (whitePoint > 0.0f) ? whitePoint : 65535.0f;
+        // Step 7: extract denoised CFA mosaic from imgdata.image.
+        // After raw2image_ex(1) + green_matching + wavelet + fbdd, imgdata.image
+        // holds denoised, black-subtracted CFA data. Normalize by the CURRENT
+        // maximum (post-wavelet bit-shift, post-black-subtraction).
         const auto& sizes = rawProcessor.imgdata.sizes;
         const auto& idata = rawProcessor.imgdata.idata;
         const auto& color = rawProcessor.imgdata.color;
         const int W = static_cast<int>(sizes.iwidth);
         const int H = static_cast<int>(sizes.iheight);
         if (W <= 0 || H <= 0) {
-            throw std::runtime_error("[CustomPipeline] invalid iwidth/iheight");
+            throw std::runtime_error("[CustomPipeline] bad dimensions");
         }
+
+        // Capture maximum AFTER wavelet (it may have been left-shifted).
+        const float normMax = static_cast<float>(color.maximum);
+        const float normDiv = (normMax > 0.0f) ? normMax : 65535.0f;
 
         RawMosaic mosaic;
         mosaic.width   = W;
@@ -223,23 +229,18 @@ ImageBuffer decodeImageWithCustomPipeline(
         mosaic.colors  = idata.colors;
         std::memcpy(mosaic.xtrans, idata.xtrans, sizeof(mosaic.xtrans));
         // LibRaw's color.cam_xyz is float[4][3]; RawMosaic.cam_xyz is
-        // double[4][3] — cast element-wise (NOT memcpy), matching
-        // decodeRawMosaic.
+        // double[4][3] — cast element-wise (NOT memcpy), matching decodeRawMosaic.
         for (int c = 0; c < 4; ++c) {
             for (int k = 0; k < 3; ++k) {
                 mosaic.cam_xyz[c][k] = static_cast<double>(color.cam_xyz[c][k]);
             }
         }
         mosaic.flip = sizes.flip;
-        // Black is already subtracted and the data is already WB-scaled +
-        // normalized to [0,1] — downstream stages must NOT re-subtract black or
-        // re-apply WB. cblack=0 / maximum=1 keep subtractBlackLevel (skipped)
-        // benign if ever re-introduced.
+        // Black already subtracted; data normalized during extraction.
         for (int c = 0; c < 4; ++c) mosaic.cblack[c] = 0.0f;
         mosaic.maximum = 1.0f;
-        // cam_mul is the REAL camera WB (scale_colors was NOT called, so WB
-        // is NOT applied yet). highlightInpaintOpposed + applyWhiteBalance
-        // downstream will use these correctly.
+        // REAL cam_mul for the green-anchored applyWhiteBalance downstream
+        // (scale_colors was NOT called, so WB is not yet applied).
         for (int c = 0; c < 4; ++c) mosaic.cam_mul[c] = color.cam_mul[c];
 
         mosaic.data.resize(static_cast<size_t>(W) * H);
@@ -253,9 +254,8 @@ ImageBuffer decodeImageWithCustomPipeline(
             }
         }
 
-        // --- Custom pipeline (Phases 2-5) on the denoised mosaic ---
-        // subtractBlackLevel: SKIPPED (subtract_black_internal did it).
-        // applyWhiteBalance:  APPLIED (green-anchored, correct — scale_colors was NOT called).
+        // Debug: mosaic data range (REMOVE before final commit)
+        // Step 8: custom pipeline (skip subtractBlackLevel — raw2image_ex(1) did it).
         fixHotPixels(mosaic);
         highlightInpaintOpposed(mosaic);
 
@@ -263,24 +263,24 @@ ImageBuffer decodeImageWithCustomPipeline(
             ? xtransMarkesteijnDemosaic(mosaic)
             : rcdDemosaic(mosaic);
 
+        // Green-anchored WB (correct — scale_colors was NOT called).
         applyWhiteBalance(img, mosaic.cam_mul);
 
-        // --- Post-demosaic chroma median via LibRaw's median_filter ---
-        // Round-trip img (camera-RGB float [0,1]) through imgdata.image
-        // (ushort[4]) so LibRaw's 3x3 chroma median runs in sensor-native
-        // space (before the camera->ProPhoto matrix), matching dcraw_process
-        // ordering. median_filter uses sizes.width/height as stride; with
-        // shrink=0 these equal iwidth/iheight == img dims. Wrapped so a
-        // failure degrades to "no median" rather than losing the image.
+        // Step 9: post-demosaic chroma median via LibRaw's median_filter.
+        // Round-trip img -> imgdata.image -> median_filter -> read back, in
+        // sensor-native space (before the camera->ProPhoto matrix). median_filter
+        // uses sizes.width/height as stride; with shrink=0 these equal
+        // iwidth/iheight == img dims. Wrapped so a failure degrades gracefully.
         try {
+            params.med_passes = 2;
             const size_t n = static_cast<size_t>(W) * H;
             for (size_t i = 0; i < n; ++i) {
-                const float r = std::clamp(img.data[i * 3 + 0], 0.0f, 1.0f) * 65535.0f;
-                const float g = std::clamp(img.data[i * 3 + 1], 0.0f, 1.0f) * 65535.0f;
-                const float b = std::clamp(img.data[i * 3 + 2], 0.0f, 1.0f) * 65535.0f;
-                img4[i][0] = static_cast<ushort>(r + 0.5f);
-                img4[i][1] = static_cast<ushort>(g + 0.5f);
-                img4[i][2] = static_cast<ushort>(b + 0.5f);
+                img4[i][0] = static_cast<ushort>(
+                    std::clamp(img.data[i * 3 + 0], 0.0f, 1.0f) * 65535.0f + 0.5f);
+                img4[i][1] = static_cast<ushort>(
+                    std::clamp(img.data[i * 3 + 1], 0.0f, 1.0f) * 65535.0f + 0.5f);
+                img4[i][2] = static_cast<ushort>(
+                    std::clamp(img.data[i * 3 + 2], 0.0f, 1.0f) * 65535.0f + 0.5f);
                 img4[i][3] = 0;  // scratch channel used by median_filter
             }
             rawProcessor.median_filter();
@@ -294,7 +294,7 @@ ImageBuffer decodeImageWithCustomPipeline(
                 "[CustomPipeline] median_filter failed (%s); skipping\n", e.what());
         }
 
-        // --- Phase 5: orientation + camera->ProPhoto matrix + clip ---
+        // Step 10: orientation + camera->ProPhoto matrix + clip.
         applyFlip(img, mosaic.flip);
         auto M = cameraToProphotoMatrix(mosaic);
         applyColorMatrix(img, M);
@@ -302,12 +302,10 @@ ImageBuffer decodeImageWithCustomPipeline(
         return img;
     } catch (const std::exception& e) {
         fprintf(stderr,
-            "[CustomPipeline] LibRaw denoise path failed (%s); "
-            "falling back to non-denoised custom pipeline\n", e.what());
+            "[CustomPipeline] denoise path failed (%s); fallback\n", e.what());
     } catch (...) {
         fprintf(stderr,
-            "[CustomPipeline] LibRaw denoise path failed (unknown); "
-            "falling back to non-denoised custom pipeline\n");
+            "[CustomPipeline] denoise path failed; fallback\n");
     }
 
     // Fallback: proven non-denoised custom pipeline. nullptr exifCollector
