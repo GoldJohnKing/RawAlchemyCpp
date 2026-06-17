@@ -192,18 +192,13 @@ ImageBuffer decodeImageWithCustomPipeline(
             rawProcessor.wavelet_denoise();
         }
 
-        // Step 6: FBDD chroma denoise (Bayer only: filters > 1000). No WB
-        // dependency; operates on imgdata.image in-place. fbdd partially
-        // demosaics (fills non-CFA channels) — extraction reads ONLY the
-        // CFA-active channel, so the partial demosaic is harmless.
-        int fbddLevel = 0;
-        if (iso <= 100.0f) fbddLevel = 0;
-        else if (iso < 3200.0f) fbddLevel = 1;
-        else fbddLevel = 2;
-        const unsigned filters = rawProcessor.imgdata.idata.filters;
-        if (fbddLevel > 0 && filters > 1000) {
-            rawProcessor.fbdd(fbddLevel);
-        }
+        // Step 6: FBDD SKIPPED — fbdd corrupts colors (crushes green → pink)
+        // when run on non-WB-scaled CFA data. fbdd's internal dcb_color_full()
+        // full-color interpolation assumes WB-normalized data; without
+        // scale_colors, the interpolated values are wrong, and fbdd_correction()'s
+        // despeckle clamps CFA values to these wrong interpolations → pink.
+        // The wavelet_denoise (step 5) + median_filter (step 9) + green_matching
+        // (step 2) provide sufficient denoise without fbdd.
 
         // Step 7: extract denoised CFA mosaic from imgdata.image.
         // After raw2image_ex(1) + green_matching + wavelet + fbdd, imgdata.image
