@@ -18,26 +18,33 @@
 namespace rawalchemy {
 
 // ============================================================
-//                       White balance
-//  Port of core.py:214-216 (applyWhiteBalance) verbatim.
+//           Mosaic white balance (pre-demosaic, v2)
+//  Clean per-channel gain on the float CFA mosaic. Models darktable's
+//  `temperature` iop (position 3.0). Green-anchored: G sites untouched,
+//  R/B photosites scaled by cam_mul/green. G2 (cfaColor==3) treated as G.
+//  Replaces the v1 design where WB was deferred to post-demosaic.
 // ============================================================
-void applyWhiteBalance(ImageBuffer& rgb, const float cam_mul[4]) {
-    const float g = cam_mul[1] > 0.0f ? cam_mul[1] : 1.0f;
-    const float rGain = cam_mul[0] / g;
-    const float bGain = cam_mul[2] / g;
+void applyWhiteBalanceMosaic(RawMosaic& m) {
+    const float g = m.cam_mul[1] > 0.0f ? m.cam_mul[1] : 1.0f;
+    const float rGain = m.cam_mul[0] / g;
+    const float bGain = m.cam_mul[2] / g;
 
-    const size_t nPixels = rgb.pixelCount();
-    float* data = rgb.ptr();
+    const int W = m.width;
+    const int H = m.height;
+    float* data = m.data.data();
 
-    // #pragma omp parallel for is a no-op (parsed & ignored) when OpenMP is
-    // disabled, so the same loop body serves both builds. OpenMP requires a
-    // signed loop index.
-    #pragma omp parallel for schedule(static, 8192)
-    for (int i = 0; i < static_cast<int>(nPixels); ++i) {
-        float* p = data + i * 3;
-        p[0] *= rGain;
-        // Green channel untouched (it's the WB anchor).
-        p[2] *= bGain;
+    #pragma omp parallel for schedule(static, 8192) collapse(2)
+    for (int row = 0; row < H; ++row) {
+        for (int col = 0; col < W; ++col) {
+            const size_t idx = static_cast<size_t>(row) * W + col;
+            const int color = cfaColor(m, row, col);
+            if (color == 0) {
+                data[idx] *= rGain;
+            } else if (color == 2) {
+                data[idx] *= bGain;
+            }
+            // color 1 (G) and 3 (G2): green anchor, untouched.
+        }
     }
 }
 

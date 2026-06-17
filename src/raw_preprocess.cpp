@@ -1,19 +1,23 @@
+// CameraFTP - A Cross-platform FTP companion for camera photo transfer
+// Copyright (C) 2026 GoldJohnKing <GoldJohnKing@Live.cn>
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 /**
  * @file raw_preprocess.cpp
  * @brief Phase 1 RAW preprocessing — black-level subtraction + hot-pixel fix.
  *
- * Direct ports of Python reference `raw_alchemy.core`:
- *   - subtract_black_level()  (core.py:20-31)
- *   - fix_hot_pixels()        (core.py:34-46)
- *
- * The hot-pixel median is hand-rolled (no OpenCV dependency). The plane loop
- * is OpenMP-parallelized to match the existing project style (src/stylize.cpp).
+ * - subtractBlackLevel(): port of Python `subtract_black_level` (core.py:20-31).
+ * - fixHotPixels(): C++ port of darktable's `src/iop/hotpixels.c` (GPL-3.0,
+ *   (C) 2011-2026 darktable developers) — `_process_bayer` + `_process_xtrans`
+ *   local 4 same-color neighbor test + MAX replacement. AGPL-3.0 compatible.
+ *   Replaces the prior global-σ + median algorithm (under-detected real hot
+ *   pixels and false-hit edges).
  */
 
 #include "raw_preprocess.h"
 
 #include <algorithm>
-#include <cmath>
+#include <vector>
 
 #ifdef RA_USE_OPENMP
 #include <omp.h>
@@ -63,139 +67,161 @@ void subtractBlackLevel(RawMosaic& m) {
     }
 }
 
-// ---- Hand-rolled 3x3 median (BORDER_REPLICATE) ----
-// Returns the median of up to 9 floats; uses std::nth_element. The scratch
-// buffer is caller-supplied so the parallel per-pixel loop can keep one on
-// each thread's stack.
-static inline float median3x3(const float* plane, int W, int H, int y, int x,
-                                float* scratch) {
-    int n = 0;
-    for (int dy = -1; dy <= 1; ++dy) {
-        int yy = y + dy;
-        if (yy < 0) yy = 0; else if (yy >= H) yy = H - 1;
-        for (int dx = -1; dx <= 1; ++dx) {
-            int xx = x + dx;
-            if (xx < 0) xx = 0; else if (xx >= W) xx = W - 1;
-            scratch[n++] = plane[static_cast<size_t>(yy) * W + xx];
-        }
-    }
-    // Median of n values: position n/2 after partial sort.
-    std::nth_element(scratch, scratch + n / 2, scratch + n);
-    return scratch[n / 2];
-}
-
-// ---- fixHotPixels ----
-// Port of Python `fix_hot_pixels` (core.py:34-46):
-//   pat_size = cfa_pattern.shape[0]
-//   for r in range(pat_size):
-//     for c in range(pat_size):
-//       plane  = raw_norm[r::pat_size, c::pat_size]
-//       med    = cv2.medianBlur(plane, 3)         # 3x3 median (oracle: scipy)
-//       diff   = np.abs(plane - med)
-//       std    = max(np.std(diff), 1e-6)
-//       hot    = diff > threshold * std
-//       plane[hot] = med[hot]
+// ---- fixHotPixels (port of darktable hotpixels.c) ----
 //
-// Parallelization: each CFA plane is processed with the per-pixel median +
-// diff/std + hot-replace as three separate #pragma omp parallel for loops.
-// Bayer has only 4 CFA offsets (patSize=2 -> 2x2) and X-Trans has 36
-// (patSize=6 -> 6x6); parallelizing across the CFA offset grid would
-// underutilize threads on Bayer, so the pixel dimension (the median hot
-// spot) is the parallel axis instead. The median is per-pixel independent;
-// the diff reduction uses an OpenMP reduction clause; the hot-replace is
-// per-pixel independent.
+// Detect hot sensor pixels based on the 4 surrounding same-color sites.
+// Pixels having 3 or 4 (depending on the `permissive` flag) surrounding
+// pixels that are dimmer than value*multiplier are considered "hot" and are
+// replaced by the maximum of the qualifying neighbour pixels. The permissive
+// variant allows correcting pairs of hot pixels in adjacent sites.
+// Replacement using the maximum produces fewer artifacts when inadvertently
+// replacing non-hot pixels. (Verbatim algorithm rationale from hotpixels.c.)
 //
-// Scratch reuse (L15): `plane`/`med` are declared once outside the CFA
-// offset loop and resized per plane (no realloc after the first/largest
-// plane), avoiding the 2*patSize*patSize allocations per call.
-void fixHotPixels(RawMosaic& m, float threshold) {
-    const int patSize = (m.filters == 9) ? 6 : 2;
+// Framework adaptations from darktable's source:
+//   - iop layer stripped: no dt_iop_hotpixels_data_t / roi_out / module /
+//     piece; params arrive directly as function arguments.
+//   - DT_OMP FOR(...) -> `#pragma omp parallel for schedule(static)
+//     reduction(+:fixed)` under the project's RA_USE_OPENMP guard.
+//   - Double-buffering preserved (darktable ivoid/ovoid split): neighbors are
+//     read from a pristine copy `in`; replacements write back to m.data. Since
+//     neighbors sit at radial offset ±2 a single buffer could chain a replaced
+//     pixel into a later pixel's read, so the copy is kept.
+//   - FCNxtrans(...) -> cfaColor(m, r, c) (already negative-index safe for
+//     X-Trans and filter-bit based for Bayer). The Bayer path keeps darktable's
+//     hardcoded ±2 / ±width*2 same-color offsets (no FC() to replace).
+//   - markfixed visualization dropped (no GUI marker in this project).
+//   - gboolean -> bool.
+void fixHotPixels(RawMosaic& m, float strength, float threshold, bool permissive) {
+    const float multiplier = strength * 0.5f;       // darktable: strength / 2.0
+    const int min_neighbours = permissive ? 3 : 4;
     const int W = m.width;
     const int H = m.height;
 
-    // For each plane (br, bc) in the patSize x patSize CFA offset grid:
-    //   planeDims: planeH = ceil((H - br) / patSize), planeW = ceil((W - bc) / patSize)
-    // Operate on the mosaic in-place by indexing through the strided subsample.
+    // Border ring of 2 needs at least a 5x5 interior core; otherwise the
+    // row/col loops below are empty. Early-out also skips the buffer copy.
+    if (H < 5 || W < 5) return;
 
-    // Reusable scratch buffers — resized per plane, never reallocated once the
-    // high-water mark is reached.
-    std::vector<float> plane, med;
+    // Double buffer: read neighbors from `in`, write replacements to m.data.
+    // Equivalent to darktable copying ovoid<-ivoid then overwriting hot pixels;
+    // non-hot pixels in m.data keep their original value untouched.
+    std::vector<float> in(m.data);
+    const float* const inBuf = in.data();
+    float* const outBuf = m.data.data();
 
-    for (int br = 0; br < patSize; ++br) {
-        for (int bc = 0; bc < patSize; ++bc) {
-            // Plane dimensions (subsampled grid).
-            const int planeH = (H - br + patSize - 1) / patSize;
-            const int planeW = (W - bc + patSize - 1) / patSize;
-            if (planeH <= 0 || planeW <= 0) continue;
+    int fixed = 0;
 
-            const size_t planeN = static_cast<size_t>(planeH) * planeW;
-            const int total = static_cast<int>(planeN);
-            plane.resize(planeN);
-            med.resize(planeN);
+    if (m.filters == 9) {
+        // X-Trans path — port of _process_xtrans (hotpixels.c L219-325).
 
-            // Pull the plane into a contiguous buffer for cache-friendly
-            // median filtering, then write back. This matches the Python
-            // semantic of `plane = raw_norm[r::pat_size, c::pat_size]`.
-            for (int py = 0; py < planeH; ++py) {
-                const int y = br + py * patSize;
-                const float* srcRow = m.data.data() + static_cast<size_t>(y) * W;
-                float* dstRow = plane.data() + static_cast<size_t>(py) * planeW;
-                for (int px = 0; px < planeW; ++px) {
-                    const int x = bc + px * patSize;
-                    dstRow[px] = srcRow[x];
+        // For each cell of the 6x6 X-Trans array, pre-calculate the (x, y)
+        // offsets of the four radially nearest same-color pixels. Built once
+        // (serially) before the parallel row loop; the table is read-only and
+        // shared across threads.
+        int offsets[6][6][4][2];
+        // Candidate offsets searched, nearest first, for like-colored pixels.
+        const int search[20][2] = { { -1, 0 },
+                                    { 1, 0 },
+                                    { 0, -1 },
+                                    { 0, 1 },
+                                    { -1, -1 },
+                                    { -1, 1 },
+                                    { 1, -1 },
+                                    { 1, 1 },
+                                    { -2, 0 },
+                                    { 2, 0 },
+                                    { 0, -2 },
+                                    { 0, 2 },
+                                    { -2, -1 },
+                                    { -2, 1 },
+                                    { 2, -1 },
+                                    { 2, 1 },
+                                    { -1, -2 },
+                                    { 1, -2 },
+                                    { -1, 2 },
+                                    { 1, 2 } };
+        for (int j = 0; j < 6; ++j) {
+            for (int i = 0; i < 6; ++i) {
+                const int c = cfaColor(m, j, i);
+                for (int s = 0, found = 0; s < 20 && found < 4; ++s) {
+                    if (c == cfaColor(m, j + search[s][1], i + search[s][0])) {
+                        offsets[j][i][found][0] = search[s][0];
+                        offsets[j][i][found][1] = search[s][1];
+                        ++found;
+                    }
                 }
             }
+        }
 
-            // 3x3 median per pixel, BORDER_REPLICATE. Each pixel is
-            // independent -> parallelize over the plane (the hot spot).
-            // scratch lives on each thread's stack.
-            const float* planeData = plane.data();
-            float* medData = med.data();
-            #pragma omp parallel for schedule(static)
-            for (int idx = 0; idx < total; ++idx) {
-                const int py = idx / planeW;
-                const int px = idx - py * planeW;
-                float scratch[9];
-                medData[idx] = median3x3(planeData, planeW, planeH, py, px, scratch);
+        #ifdef RA_USE_OPENMP
+        #pragma omp parallel for schedule(static) reduction(+:fixed)
+        #endif
+        for (int row = 2; row < H - 2; row++) {
+            const float* inRow = inBuf + static_cast<size_t>(W) * row + 2;
+            float* outRow = outBuf + static_cast<size_t>(W) * row + 2;
+            for (int col = 2; col < W - 2; col++, inRow++, outRow++) {
+                const float pix = *inRow;
+                const float mid = pix * multiplier;
+                if (pix > threshold) {
+                    int count = 0;
+                    float maxin = 0.0f;
+                    for (int n = 0; n < 4; ++n) {
+                        const int xx = offsets[row % 6][col % 6][n][0];
+                        const int yy = offsets[row % 6][col % 6][n][1];
+                        // size_t multiply mirrors darktable's `yy * (size_t)width`:
+                        // modular arithmetic reproduces the signed offset exactly.
+                        const float other = *(inRow + xx + yy * static_cast<size_t>(W));
+                        if (mid > other) {
+                            count++;
+                            if (other > maxin) maxin = other;
+                        }
+                    }
+                    if (count >= min_neighbours) {
+                        *outRow = maxin;
+                        fixed++;
+                    }
+                }
             }
+        }
+    } else {
+        // Bayer path — port of _process_bayer (hotpixels.c L105-158).
+        // Same-color neighbors at radial offset ±2 cols / ±2 rows: stride 2
+        // always lands on the same CFA color for any standard 2x2 Bayer pattern.
+        const int widthx2 = W * 2;
 
-            // diff = abs(plane - med); std = max(stddev(diff), 1e-6).
-            // Python uses np.std(diff) which is population std (ddof=0).
-            // Reuse plane[] to store |diff| (avoids another alloc). The two
-            // accumulators are reduced across threads.
-            float* diffData = plane.data();
-            double sum = 0.0, sumSq = 0.0;
-            #pragma omp parallel for schedule(static) reduction(+:sum,sumSq)
-            for (int idx = 0; idx < total; ++idx) {
-                const float d = std::fabs(diffData[idx] - medData[idx]);
-                diffData[idx] = d;
-                sum += static_cast<double>(d);
-                sumSq += static_cast<double>(d) * d;
-            }
-            const double mean = sum / static_cast<double>(planeN);
-            double variance = sumSq / static_cast<double>(planeN) - mean * mean;
-            if (variance < 0.0) variance = 0.0;  // guard against FP rounding
-            float std_v = static_cast<float>(std::sqrt(variance));
-            if (std_v < 1e-6f) std_v = 1e-6f;
-            const float cutoff = threshold * std_v;
-
-            // hot = diff > cutoff; replace hot pixels in the mosaic with median.
-            // Non-hot pixels keep their existing mosaic value (untouched in
-            // m.data). plane[] currently holds |diff|; med[] holds the median.
-            #pragma omp parallel for schedule(static)
-            for (int py = 0; py < planeH; ++py) {
-                const int y = br + py * patSize;
-                float* dstRow = m.data.data() + static_cast<size_t>(y) * W;
-                const float* medRow  = medData + static_cast<size_t>(py) * planeW;
-                const float* diffRow = diffData + static_cast<size_t>(py) * planeW;
-                for (int px = 0; px < planeW; ++px) {
-                    if (diffRow[px] > cutoff) {
-                        dstRow[bc + px * patSize] = medRow[px];
+        #ifdef RA_USE_OPENMP
+        #pragma omp parallel for schedule(static) reduction(+:fixed)
+        #endif
+        for (int row = 2; row < H - 2; row++) {
+            const float* inRow = inBuf + static_cast<size_t>(W) * row + 2;
+            float* outRow = outBuf + static_cast<size_t>(W) * row + 2;
+            for (int col = 2; col < W - 2; col++, inRow++, outRow++) {
+                const float pix = *inRow;
+                const float mid = pix * multiplier;
+                if (pix > threshold) {
+                    int count = 0;
+                    float maxin = 0.0f;
+                    float other;
+                    #define TESTONE(OFFSET)                                  \
+                        other = inRow[OFFSET];                               \
+                        if (mid > other) {                                   \
+                            count++;                                         \
+                            if (other > maxin) maxin = other;                \
+                        }
+                    TESTONE(-2);
+                    TESTONE(-widthx2);
+                    TESTONE(+2);
+                    TESTONE(+widthx2);
+                    #undef TESTONE
+                    if (count >= min_neighbours) {
+                        *outRow = maxin;
+                        fixed++;
                     }
                 }
             }
         }
     }
+
+    (void)fixed;  // diagnostic counter kept for OpenMP reduction fidelity
 }
 
 } // namespace rawalchemy

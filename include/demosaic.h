@@ -11,9 +11,10 @@
  *    Markesteijn (1-pass variant).
  *
  * Input:  RawMosaic — black-level subtracted, hot-pixel fixed, highlight-
- *         reconstructed, normalized to [0, 1] (Phase 1+2 output).
+ *         reconstructed, WHITE-BALANCED, normalized to [0, 1] (Phase 1+2+WB
+ *         output). v2: WB now applied pre-demosaic (was post- in v1).
  * Output: ImageBuffer (H x W x 3 float RGB), camera-native RGB,
- *         PRE white-balance / PRE color matrix. WB+matrix come in Phase 5.
+ *         POST white-balance / PRE color matrix. Matrix comes in Phase 5.
  *
  * RCD (Bayer): the 8-stage pipeline (populate -> step1..step4_3 ->
  * write_output) runs on the interior; a 4-pixel border is filled by simple

@@ -3,27 +3,33 @@
  * @brief Shared custom CPU demosaic pipeline (Phases 1-5) — used by BOTH the
  *        CLI (src/main.cpp) and the C API (src/raw_alchemy_capi.cpp).
  *
- * Single source of truth for the custom RAW decode. The pipeline reuses
- * LibRaw's OWN compiled denoise stages (green_matching + wavelet + FBDD +
- * post-demosaic chroma median) via the DenoiseLibRaw subclass, restoring the
- * color-noise control the old dcraw_process path had but the hand-rolled
- * custom path had dropped.
+ * Single source of truth for the custom RAW decode. v2 pipeline (darktable-
+ * aligned order). Reuses LibRaw's compiled green_matching + wavelet_denoise
+ * via the DenoiseLibRaw subclass; fixHotPixels is a darktable hotpixels.c port
+ * (4-neighbour MAX replacement); demosaic is a RawTherapee rcd_demosaic.cc port.
  *
- * DECOUPLED pipeline (ora-1): WB and denoise are kept separate so the green-
- * anchored applyWhiteBalance (not LibRaw's max-anchored scale_colors) controls
- * white balance. scale_colors is NOT called. Stage order:
+ * Stage order (cf. darktable iop priority numbers):
  *   open -> unpack -> raw2image_ex(1) [inline black subtract] ->
  *   green_matching -> [set green-anchored pre_mul] ->
- *   [ISO-adaptive threshold -> wavelet_denoise] -> [fbdd (Bayer only)] ->
+ *   [ISO-adaptive threshold -> wavelet_denoise] (rawdenoise(7) equivalent) ->
  *   extract denoised CFA mosaic (normalize by post-wavelet maximum) ->
- *   fixHotPixels -> highlightInpaintOpposed ->
- *   (rcdDemosaic | xtransMarkesteijnDemosaic) -> applyWhiteBalance ->
- *   median_filter (post-demosaic chroma median) ->
+ *   applyWhiteBalanceMosaic [temperature(3.0), clean per-channel gain on float] ->
+ *   zero cam_mul [so highlight's virtual-WB path sees identity gains] ->
+ *   highlightInpaintOpposed [highlights(4.0)] ->
+ *   fixHotPixels [hotpixels(6.0), darktable port] ->
+ *   (rcdDemosaic | xtransMarkesteijnDemosaic) [demosaic(8.0)] ->
+ *   median_filter (post-demosaic chroma median, denoiseprofile(9) equivalent) ->
  *   applyFlip -> cameraToProphotoMatrix -> applyColorMatrix -> clamp [0,1].
  *
+ * Tradeoff (deepwork plan Path A2): wavelet_denoise runs PRE-WB on ushort
+ * imgdata.image to avoid rewriting it in float (keeps LibRaw code, respects
+ * "minimize custom" constraint). This is the only deviation from darktable's
+ * rawdenoise(7.0) post-WB positioning; the stronger darktable hotpixels port
+ * compensates the lost hot-pixel coverage.
+ *
  * If any LibRaw denoise stage throws, the function falls back to the proven
- * non-denoised custom pipeline (decodeRawMosaic -> ... -> applyWhiteBalance)
- * so callers always get valid output.
+ * non-denoised custom pipeline (decodeCustomPipelineNoDenoise, same v2 order
+ * minus the LibRaw denoise stages) so callers always get valid output.
  */
 
 #include "raw_pipeline.h"
@@ -87,16 +93,21 @@ void throwLibRawError(int ret, const char* context) {
 // ---- LibRaw denoise fallback (proven non-denoised custom pipeline) ----
 // Used when any LibRaw denoise stage throws. Re-opens WITHOUT an exif callback
 // (the primary open already collected EXIF) so tags are not duplicated, then
-// runs the original 7-stage custom path.
+// runs the v2 custom path (WB-front, darktable-aligned order). Kept in sync
+// with decodeImageWithCustomPipeline's post-extraction stages.
 ImageBuffer decodeCustomPipelineNoDenoise(const std::string& inputPath) {
     auto mosaic = decodeRawMosaic(inputPath, nullptr);
     subtractBlackLevel(mosaic);
-    fixHotPixels(mosaic);
+    // v2: WB applied on float mosaic (pre-demosaic), matching darktable
+    // temperature(3.0). Zero cam_mul afterward so highlightInpaintOpposed's
+    // virtual-WB path sees identity gains (data already WB'd).
+    applyWhiteBalanceMosaic(mosaic);
+    for (int c = 0; c < 4; ++c) mosaic.cam_mul[c] = mosaic.cam_mul[1];
     highlightInpaintOpposed(mosaic);
+    fixHotPixels(mosaic);
     ImageBuffer img = (mosaic.filters == 9)
         ? xtransMarkesteijnDemosaic(mosaic)
         : rcdDemosaic(mosaic);
-    applyWhiteBalance(img, mosaic.cam_mul);
     applyFlip(img, mosaic.flip);
     auto M = cameraToProphotoMatrix(mosaic);
     applyColorMatrix(img, M);
@@ -110,16 +121,24 @@ ImageBuffer decodeCustomPipelineNoDenoise(const std::string& inputPath) {
 //             decodeImageWithCustomPipeline
 // ============================================================
 //
-// Decoupled LibRaw denoise + custom WB. Owns a single DenoiseLibRaw across
+// v2 pipeline (darktable-aligned order). Owns a single DenoiseLibRaw across
 // the whole flow so the LibRaw denoise stages (which mutate imgdata.image in
 // place) run on the same buffer the mosaic is later extracted from, and the
 // post-demosaic median_filter can round-trip through the same imgdata.image.
 //
-// WB is NOT delegated to LibRaw's scale_colors (which is max-anchored and
-// crushes green -> magenta cast). Instead the green-anchored applyWhiteBalance
-// runs after demosaic, exactly like the non-denoised custom path. The LibRaw
-// denoise stages that have NO WB dependency (green_matching, wavelet_denoise,
-// fbdd, median_filter) are called directly.
+// Order (cf. darktable iop priority): rawprepare(1) -> [green_matching] ->
+// wavelet/rawdenoise(7) -> extract mosaic -> temperature/WB(3) ->
+// highlights(4) -> hotpixels(6) -> demosaic(8) -> median/denoiseprofile(9).
+//
+// WB is NOT delegated to LibRaw's scale_colors (max-anchored -> magenta cast).
+// Instead applyWhiteBalanceMosaic runs on the float mosaic PRE-demosaic
+// (clean per-channel gain, no ushort saturation). cam_mul is zeroed right
+// after so highlightInpaintOpposed's virtual-WB path sees identity gains.
+//
+// Note: wavelet_denoise runs PRE-WB on ushort imgdata.image (Path A2 tradeoff
+// in deepwork plan — keeps LibRaw wavelet without rewrite; the only deviation
+// from darktable rawdenoise(7) post-WB positioning). hotpixels is the darktable
+// port (4-neighbour MAX replacement); demosaic is the RT RCD port.
 ImageBuffer decodeImageWithCustomPipeline(
     const std::string& inputPath,
     ExifCollector* exifCollector) {
@@ -192,18 +211,12 @@ ImageBuffer decodeImageWithCustomPipeline(
             rawProcessor.wavelet_denoise();
         }
 
-        // Step 6: FBDD SKIPPED — fbdd corrupts colors (crushes green → pink)
-        // when run on non-WB-scaled CFA data. fbdd's internal dcb_color_full()
-        // full-color interpolation assumes WB-normalized data; without
-        // scale_colors, the interpolated values are wrong, and fbdd_correction()'s
-        // despeckle clamps CFA values to these wrong interpolations → pink.
-        // The wavelet_denoise (step 5) + median_filter (step 9) + green_matching
-        // (step 2) provide sufficient denoise without fbdd.
-
-        // Step 7: extract denoised CFA mosaic from imgdata.image.
-        // After raw2image_ex(1) + green_matching + wavelet + fbdd, imgdata.image
+        // Step 6: extract denoised CFA mosaic from imgdata.image.
+        // After raw2image_ex(1) + green_matching + wavelet, imgdata.image
         // holds denoised, black-subtracted CFA data. Normalize by the CURRENT
         // maximum (post-wavelet bit-shift, post-black-subtraction).
+        // (FBDD is intentionally not used — darktable/RT do not use it either;
+        // their pre-demosaic denoise is the wavelet above + hotpixels below.)
         const auto& sizes = rawProcessor.imgdata.sizes;
         const auto& idata = rawProcessor.imgdata.idata;
         const auto& color = rawProcessor.imgdata.color;
@@ -234,8 +247,8 @@ ImageBuffer decodeImageWithCustomPipeline(
         // Black already subtracted; data normalized during extraction.
         for (int c = 0; c < 4; ++c) mosaic.cblack[c] = 0.0f;
         mosaic.maximum = 1.0f;
-        // REAL cam_mul for the green-anchored applyWhiteBalance downstream
-        // (scale_colors was NOT called, so WB is not yet applied).
+        // REAL cam_mul stored for applyWhiteBalanceMosaic downstream (v2: WB
+        // applied on the float mosaic pre-demosaic; scale_colors NOT called).
         for (int c = 0; c < 4; ++c) mosaic.cam_mul[c] = color.cam_mul[c];
 
         mosaic.data.resize(static_cast<size_t>(W) * H);
@@ -249,17 +262,21 @@ ImageBuffer decodeImageWithCustomPipeline(
             }
         }
 
-        // Debug: mosaic data range (REMOVE before final commit)
         // Step 8: custom pipeline (skip subtractBlackLevel — raw2image_ex(1) did it).
-        fixHotPixels(mosaic);
+        // v2: WB applied on float mosaic (pre-demosaic), matching darktable
+        // temperature(3.0). Zero cam_mul afterward so highlightInpaintOpposed's
+        // virtual-WB path sees identity gains (data is already WB'd).
+        applyWhiteBalanceMosaic(mosaic);
+        for (int c = 0; c < 4; ++c) mosaic.cam_mul[c] = mosaic.cam_mul[1];
+
+        // darktable order: highlights(4.0) before hotpixels(6.0) before demosaic(8.0).
         highlightInpaintOpposed(mosaic);
+        fixHotPixels(mosaic);
 
         ImageBuffer img = (mosaic.filters == 9)
             ? xtransMarkesteijnDemosaic(mosaic)
             : rcdDemosaic(mosaic);
-
-        // Green-anchored WB (correct — scale_colors was NOT called).
-        applyWhiteBalance(img, mosaic.cam_mul);
+        // WB already applied on mosaic above — no post-demosaic WB.
 
         // Step 9: post-demosaic chroma median via LibRaw's median_filter.
         // Round-trip img -> imgdata.image -> median_filter -> read back, in

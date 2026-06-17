@@ -31,23 +31,33 @@ namespace rawalchemy {
 void subtractBlackLevel(RawMosaic& m);
 
 /**
- * @brief Detect and replace hot/dead pixels per CFA plane.
+ * @brief Detect and replace hot pixels — port of darktable `hotpixels.c`.
  *
- * Port of Python `fix_hot_pixels` (core.py:34-46).
+ * Direct C++ port of darktable's `_process_bayer` + `_process_xtrans`
+ * (src/iop/hotpixels.c), matching darktable's iop order position 6.0
+ * (after highlights, before rawdenoise). Replaces the prior Python
+ * `fix_hot_pixels` global-σ + median algorithm (weaker:漏检 + 边缘误检).
  *
- * Operates on each CFA plane independently (subsampled by patSize). For each
- * plane: 3x3 median filter (BORDER_REPLICATE), compute |plane - median|,
- * flag pixels where diff > threshold * std(diff), replace with median.
+ * Algorithm (darktable semantics):
+ *   - Per-pixel, per-CFA-plane: 4 same-color radial neighbors
+ *     (Bayer: ±2 / ±width*2 same-color sites; X-Trans: precomputed offsets).
+ *   - Detection: `pixel * (strength/2) > neighbor` for >= min_neighbours
+ *     neighbors (min_neighbours = permissive ? 3 : 4). Also requires
+ *     `pixel > threshold` to enter detection (avoid dark-current false hits).
+ *   - Replacement: hot pixel <- max of qualifying neighbors (NOT median;
+ *     darktable notes MAX produces fewer false-replacement artifacts).
  *
- * Hand-rolled median (no OpenCV). Parallelized over the plane's PIXELS (the
- * median is the hot spot) — the patSize x patSize CFA offset grid is the
- * serial outer loop, since Bayer has only 4 offsets and would underthread a
- * collapse(2) over offsets. Scratch buffers (plane/median) are reused across
- * CFA planes (resized, not reallocated).
+ * Data state: operates on [0,1]-normalized, POST-white-balance float CFA
+ * mosaic (RawMosaic::data) — matches darktable's IOP_CS_RAW assumption
+ * (post rawprepare + temperature). Single-channel; WB is a uniform per-
+ * channel scale so the relative-brightness test is WB-invariant anyway.
  *
- * @param m          Mosaic (modified in-place; assumed already normalized).
- * @param threshold  Outlier threshold in units of std (default 4.0, matches Python).
+ * @param m            Mosaic (modified in-place; assumed post-WB normalized).
+ * @param strength     0..1, darktable default 0.25 (-> multiplier 0.125).
+ * @param threshold    0..1, darktable default 0.05 (skip pixels below this).
+ * @param permissive   If true, require 3 (not 4) qualifying neighbors.
  */
-void fixHotPixels(RawMosaic& m, float threshold = 4.0f);
+void fixHotPixels(RawMosaic& m, float strength = 0.25f,
+                  float threshold = 0.05f, bool permissive = false);
 
 } // namespace rawalchemy

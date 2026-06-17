@@ -5,36 +5,43 @@
  *        flip + camera->working color matrix application.
  *
  * Direct ports of Python reference `raw_alchemy.core`:
- *   - applyWhiteBalance()   (core.py:214-216)
  *   - applyFlip()           (core.py:212 -> onnx/denoiser.py:412-431 _apply_flip)
  *
- * Plus the camera->ProPhoto color-matrix application site that consumes the
- * matrix derived in colorspace_matrices.h. These operate on a demosaiced
- * camera-RGB ImageBuffer (H x W x 3), in-place.
+ * Plus applyWhiteBalanceMosaic (v2: pre-demosaic float-mosaic WB, darktable
+ * temperature(3.0) equivalent) and the camera->ProPhoto color-matrix
+ * application site. WB+matrix operate on a demosaiced camera-RGB ImageBuffer;
+ * applyWhiteBalanceMosaic operates on the pre-demosaic float CFA mosaic.
  */
 
 #include "common.h"
+#include "raw_mosaic.h"
 
 #include <array>
 
 namespace rawalchemy {
 
 /**
- * @brief Apply camera white balance to a demosaiced RGB image (in-place).
+ * @brief Apply camera white balance to a CFA mosaic IN-PLACE (pre-demosaic).
  *
- * Port of Python core.py:214-216. Green channel is the anchor (untouched);
- * R and B are scaled by the green-normalized WB coefficients:
- *   g = cam_mul[1] > 0 ? cam_mul[1] : 1.0
- *   rgb[:, :, 0] *= cam_mul[0] / g
- *   rgb[:, :, 2] *= cam_mul[2] / g
+ * New in v2 refactor: clean per-channel gain multiplication on the float
+ * mosaic, modeled on darktable's `temperature` iop (position 3.0). This
+ * REPLACES the prior design where WB was deferred to post-demosaic via
+ * `applyWhiteBalance(ImageBuffer&, ...)` to avoid LibRaw `scale_colors`'s
+ * max-anchored magenta cast. Running WB on the float mosaic (not ushort
+ * imgdata.image) avoids both the cast AND ushort R/B saturation.
  *
- * This is the WB MULTIPLY on demosaiced RGB — separate from the matrix's
- * daylight-WB row-normalize (which is baked into cameraToProphotoMatrix).
+ * Green-anchored: g = cam_mul[1] (or 1.0 if <=0); each photosite's value is
+ * scaled by cam_mul[cfaColor]/g where cfaColor is the photosite's CFA color.
+ * This is a uniform per-channel multiply — single-channel mosaic, no chroma
+ * cross-talk. After this call the mosaic is WHITE-BALANCED (downstream
+ * highlights/hotpixels/demosaic all see post-WB data, matching darktable).
  *
- * @param rgb      Demosaiced camera-RGB image (modified in-place).
- * @param cam_mul  Camera WB coefficients (length 4; only [0],[1],[2] used).
+ * @param m  Mosaic (modified in-place). Uses m.cam_mul + m.filters/xtrans to
+ *           resolve per-photosite channel. cam_mul is NOT modified by this
+ *           call (callers that need cam_mul zeroed afterward, e.g. before
+ *           highlightInpaintOpposed's virtual-WB path, must do it themselves).
  */
-void applyWhiteBalance(ImageBuffer& rgb, const float cam_mul[4]);
+void applyWhiteBalanceMosaic(RawMosaic& m);
 
 /**
  * @brief Apply LibRaw/dcraw orientation flip to a demosaiced RGB image
