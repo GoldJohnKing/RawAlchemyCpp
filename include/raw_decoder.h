@@ -13,6 +13,7 @@
  */
 
 #include "common.h"
+#include "demosaic.h"
 #include <string>
 
 namespace rawalchemy {
@@ -70,6 +71,10 @@ struct DecodeParams {
 
     /// Wavelet denoise threshold: <0 = auto (ISO-adaptive), 0 = off, >0 = manual
     float denoiseThreshold = -1.0f;
+
+    /// Demosaic algorithm selection (default AUTO: Bayer→RCD, X-Trans→Markesteijn).
+    /// Set to LIBRAW_FALLBACK to use the original LibRaw path (uses demosaicQuality).
+    DemosaicAlgorithm demosaicAlgorithm = DemosaicAlgorithm::AUTO;
 };
 
 /**
