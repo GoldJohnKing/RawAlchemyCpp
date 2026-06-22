@@ -5,18 +5,58 @@
  * @file demosaic_rcd.h
  * @brief Ratio Corrected Demosaicing (RCD) for Bayer CFA sensors.
  *
- * darktable-derived implementation. The real port lands in Task 9; today the
- * definition lives in demosaic_dispatch.cpp as a bilinear stub.
+ * Ported from darktable's rcd.c:
+ *   Copyright (C) 2010-2026 darktable developers.
+ *   Original algorithm: Luis Sanz Rodríguez, RCD 2.3 @ 171125.
+ *   Tiling: Ingo Weyrich. Performance tuning: Hanno Schwalm.
+ *   Original code: https://github.com/LuisSR/RCD-Demosaicing (GPL-3.0).
+ *
+ * The darktable source is preserved verbatim in .reference/darktable/rcd.c.
+ * Helper substitutions applied (see Task 9 brief):
+ *   - FC(row,col)              → detail::fcColor(row, col, filters)
+ *   - dt_alloc_align_float(n)  → AlignedVector<float>(n)  (RAII, 64-byte align)
+ *   - dt_free_align(p)         → (RAII destructor)
+ *   - DT_OMP_PRAGMA(...)       → raw #pragma omp ...
+ *   - interpolatef / CLIP / sqrf → inline functions in demosaic_rcd.cpp
+ *
+ * Deviations from darktable (documented in demosaic_rcd.cpp):
+ *   - Output is planar RGB float[3*w*h], not float4 interleaved.
+ *   - Border fallback uses CFA-aware 3x3 averaging (border_interpolate)
+ *     instead of darktable's full PPG pass (demosaic_ppg source not in our
+ *     reference bundle). Visual impact is confined to the rim.
+ *   - No scaler normalization: input is [0,1], output is [0,1].
  */
 
 namespace rawalchemy {
+
+/// Algorithm constants — tuned values from darktable rcd.c.
+/// Do not change without re-benchmarking quality/performance.
+/// @{
+
+/// Tile-overlap rim width. Real RCD output starts RCD_BORDER inside each
+/// interior tile boundary (RCD_MARGIN inside the outermost tile).
+constexpr int RCD_BORDER = 9;
+
+/// Outermost-tile inner rim. The image edge is filled by the border fallback
+/// out to RCD_BORDER pixels; the outermost RCD tile covers the rest starting
+/// at RCD_MARGIN from the edge.
+constexpr int RCD_MARGIN = 7;
+
+/// Compile-time tile dimension. Tuned for x86/64 cache behavior; documented
+/// in darktable rcd.c notes.
+constexpr int RCD_TILESIZE = 1100;
+
+/// Valid (non-overlapping) inner region per tile.
+constexpr int RCD_TILEVALID = RCD_TILESIZE - 2 * RCD_BORDER;
+
+/// @}
 
 /// RCD demosaic for Bayer CFA input.
 ///
 /// @param in       single-channel CFA mosaic, float[w*h] in [0,1], preprocessed
 /// @param out      planar RGB output, float[3*w*h], layout [R plane | G plane | B plane]
 /// @param w, h     image dimensions
-/// @param filters  LibRaw CFA bitmask (any value other than 9)
+/// @param filters  LibRaw CFA bitmask (any value other than 9 — X-Trans goes through markesteijn_demosaic)
 void rcd_demosaic(const float* in, float* out, int w, int h, unsigned filters);
 
 } // namespace rawalchemy
