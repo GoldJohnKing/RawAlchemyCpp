@@ -35,18 +35,20 @@ namespace rawalchemy {
 
 /// Tile-overlap rim width. Real RCD output starts RCD_BORDER inside each
 /// interior tile boundary (RCD_MARGIN inside the outermost tile).
-constexpr int RCD_BORDER = 9;
+/// darktable rcd.c:68 — "must be 10 to be stable".
+constexpr int RCD_BORDER = 10;
 
 /// Outermost-tile inner rim. The image edge is filled by the border fallback
 /// out to RCD_BORDER pixels; the outermost RCD tile covers the rest starting
-/// at RCD_MARGIN from the edge.
-constexpr int RCD_MARGIN = 7;
+/// at RCD_MARGIN from the edge. darktable rcd.c:69.
+constexpr int RCD_MARGIN = 9;
 
-/// Compile-time tile dimension. Tuned for x86/64 cache behavior; documented
-/// in darktable rcd.c notes.
-constexpr int RCD_TILESIZE = 1100;
+/// Compile-time tile dimension. darktable.h:265 — DT_RCD_TILESIZE default;
+/// tuned for x86/64 cache behavior. The smaller value keeps per-thread
+/// scratch at ~325 KB instead of ~33 MB.
+constexpr int RCD_TILESIZE = 112;
 
-/// Valid (non-overlapping) inner region per tile.
+/// Valid (non-overlapping) inner region per tile (= 92).
 constexpr int RCD_TILEVALID = RCD_TILESIZE - 2 * RCD_BORDER;
 
 /// @}

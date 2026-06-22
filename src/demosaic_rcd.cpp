@@ -44,6 +44,7 @@
 #include "cfa_lookup.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -113,12 +114,12 @@ void borderInterpolate(const float* in, float* out, int w, int h,
                     const int x = col + dx;
                     if (x < 0 || x >= w) continue;
                     const unsigned c = detail::fcColor(y, x, filters);
-                    sum[c] += in[static_cast<size_t>(y) * w + x];
+                    sum[c] += std::max(0.0f, in[static_cast<size_t>(y) * w + x]);
                     cnt[c] += 1;
                 }
             }
             const unsigned center_c = detail::fcColor(row, col, filters);
-            const float center_val = in[static_cast<size_t>(row) * w + col];
+            const float center_val = std::max(0.0f, in[static_cast<size_t>(row) * w + col]);
             float rgb[3] = {0.0f, 0.0f, 0.0f};
             for (int c = 0; c < 3; ++c) {
                 if (c == static_cast<int>(center_c)) {
@@ -158,7 +159,7 @@ void rcd_demosaic(const float* in, float* out, int w, int h, unsigned filters) {
 #endif
     {
         // Per-thread scratch — allocated once per worker and reused across
-        // every tile the thread processes. Total ~33 MB per thread.
+        // every tile the thread processes. Total ~325 KB per thread.
         // AlignedVector zero-initializes (std::vector contract), matching
         // darktable's dt_calloc_align_float for VH_Dir (the only buffer
         // whose unwritten border is read by the refinement passes).
