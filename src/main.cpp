@@ -80,7 +80,9 @@ static void printUsage(const char* prog) {
         "  --no-boost         Disable saturation/contrast boost\n"
         "  --half-size        Decode at half resolution (fast preview)\n"
         "  --no-camera-wb     Don't use camera white balance\n"
-        "  --demosaic N       Demosaic: 3=AHD (default), 11=AAHD\n"
+        "  --demosaic ALGO    Demosaic algorithm: auto (default), rcd, markesteijn,\n"
+        "                     libraw. An integer (3=AHD, 11=AAHD) selects LibRaw's\n"
+        "                     built-in path for backward compatibility.\n"
         "  --no-compress      Save TIFF without compression\n"
         "  --jpeg-quality N   JPEG quality 1-100 (default: 95)\n"
         "  --jpeg-optimize   Optimize Huffman tables (smaller file, slower)\n"
@@ -112,6 +114,10 @@ int main(int argc, char* argv[]) {
     bool   infoOnly    = false;
     bool   lensCorrection = true;
     int    demosaicQ   = 3;
+    // Algorithm name for the darktable-derived path. The legacy integer form
+    // of --demosaic (e.g. "3", "11") forces LIBRAW_FALLBACK below and only
+    // adjusts demosaicQ, preserving backward compatibility.
+    std::string demosaicAlgo = "auto";  // auto | rcd | markesteijn | libraw
     int    jpegQuality  = 95;
     bool   jpegOptimize = false;
 
@@ -129,7 +135,19 @@ int main(int argc, char* argv[]) {
         else if (opt == "--jpeg-quality" && i + 1 < argc){ jpegQuality = std::atoi(argv[++i]); }
         else if (opt == "--jpeg-optimize")               { jpegOptimize = true; }
         else if (opt == "--info")                        { infoOnly = true; }
-        else if (opt == "--demosaic" && i + 1 < argc)    { demosaicQ = std::atoi(argv[++i]); }
+        else if (opt == "--demosaic" && i + 1 < argc) {
+            const char* v = argv[++i];
+            // Polymorphic: an algorithm name selects the darktable-derived
+            // demosaic path; a bare integer (3=AHD, 11=AAHD, ...) keeps the
+            // legacy LibRaw user_qual path for backward compatibility.
+            if (std::strcmp(v, "auto") == 0 || std::strcmp(v, "rcd") == 0 ||
+                std::strcmp(v, "markesteijn") == 0 || std::strcmp(v, "libraw") == 0) {
+                demosaicAlgo = v;
+            } else {
+                demosaicQ = std::atoi(v);
+                demosaicAlgo = "libraw";  // integer form → LibRaw fallback
+            }
+        }
         else if (opt == "--lens-correction")             { lensCorrection = true; }
         else if (opt == "--no-lens-correction")          { lensCorrection = false; }
         else if (opt == "--custom-lensfun-db" && i + 1 < argc) { customLensfunDb = argv[++i]; }
@@ -178,6 +196,17 @@ int main(int argc, char* argv[]) {
         params.halfSize = halfSize;
         params.useCameraWb = useCameraWb;
         params.demosaicQuality = demosaicQ;
+
+        // Map --demosaic string to DemosaicAlgorithm enum.
+        if (demosaicAlgo == "rcd") {
+            params.demosaicAlgorithm = rawalchemy::DemosaicAlgorithm::RCD;
+        } else if (demosaicAlgo == "markesteijn") {
+            params.demosaicAlgorithm = rawalchemy::DemosaicAlgorithm::MARKESTEIJN_3PASS;
+        } else if (demosaicAlgo == "libraw") {
+            params.demosaicAlgorithm = rawalchemy::DemosaicAlgorithm::LIBRAW_FALLBACK;
+        } else {
+            params.demosaicAlgorithm = rawalchemy::DemosaicAlgorithm::AUTO;
+        }
 
         // Collect EXIF tags during decode if output is JPEG
         // (must be set before open_file, so we create collector before decode)
