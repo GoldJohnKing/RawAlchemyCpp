@@ -20,6 +20,34 @@ if(BUILD_SHARED)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON CACHE BOOL "" FORCE)
 endif()
 
+# ---- Pin OpenMP to standalone LLVM libomp (FFI Windows clang-cl build) ----
+#
+# The FFI DLL is LoadLibrary'd from a temp dir by the Rust host, so it must not
+# carry a load-time dependency on the MSVC-bundled libomp140.x86_64.dll (no clean
+# release-redist loose file; absent on end-user machines → LoadLibrary fails).
+# Pin every find_package(OpenMP) call — ours below and LibRaw's, pulled in via
+# add_subdirectory right after this block — to the standalone LLVM libomp that
+# ships alongside clang-cl: runtime libomp.dll (Apache-2.0 + LLVM-exception,
+# redistributable), copied next to the DLL and preloaded by the host.
+#
+# find_package(OpenMP) resolves the lib via compiler HINTS that outrank
+# CMAKE_LIBRARY_PATH, so we override its find_library cache var directly with FORCE.
+if(WIN32 AND BUILD_SHARED AND NOT BUILD_CLI
+        AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    get_filename_component(_clang_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+    get_filename_component(_llvm_libdir "${_clang_bindir}/../lib" ABSOLUTE)
+    set(RA_LIBOMP_RUNTIME "${_clang_bindir}/libomp.dll")
+    if(EXISTS "${_llvm_libdir}/libomp.lib" AND EXISTS "${RA_LIBOMP_RUNTIME}")
+        set(OpenMP_libomp_LIBRARY "${_llvm_libdir}/libomp.lib" CACHE FILEPATH
+            "libomp import lib (pinned to standalone LLVM for FFI Windows build)" FORCE)
+        set(RA_OPENMP_PINNED TRUE)
+    else()
+        message(WARNING "Standalone LLVM libomp not found under ${_llvm_libdir}; "
+                "OpenMP will fall back to the MSVC-bundled runtime "
+                "(libomp140.x86_64.dll), which the host cannot load at runtime.")
+    endif()
+endif()
+
 # ---- Dependencies (built from git submodules) ----
 
 # LibRaw via LibRaw-cmake wrapper
@@ -196,7 +224,7 @@ ExternalProject_Add(libjpeg-turbo_external
 )
 
 # Create an imported static library target for libjpeg-turbo
-# Uses config-specific IMPORTED_LOCATION for MSVC multi-config generator compatibility
+# Uses config-specific IMPORTED_LOCATION for multi-config generator compatibility (VS/clang-cl)
 add_library(turbojpeg STATIC IMPORTED GLOBAL)
 set(TURBOJPEG_LIB "${LIBJPEG_TURBO_INSTALL}/lib/${CMAKE_STATIC_LIBRARY_PREFIX}${TURBOJPEG_LIB_NAME}${CMAKE_STATIC_LIBRARY_SUFFIX}")
 set_target_properties(turbojpeg PROPERTIES
@@ -370,14 +398,30 @@ if(BUILD_SHARED)
         CXX_VISIBILITY_PRESET default
         VISIBILITY_INLINES_HIDDEN OFF
     )
-    # Windows: generate .lib import library alongside .dll
+    # Windows: output DLL + import .lib. $<CONFIG> makes the layout bin/<Config>/
+    # identical for both Ninja (single-config) and the VS multi-config generator,
+    # so consumers don't need to know which generator produced the artifacts.
     if(WIN32)
         set_target_properties(raw_alchemy_core PROPERTIES
-            WINDOWS_EXPORT_ALL_SYMBOLS ON
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin"
-            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib"
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+            LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/$<CONFIG>"
+            ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib/$<CONFIG>"
         )
+        # Only the FFI build (BUILD_CLI=OFF, the default for the shipped DLL)
+        # keeps exports to the RA_API-marked C surface, which lets LTO work.
+        # When the CLI links against the shared lib it needs internal C++ symbols,
+        # so fall back to auto-exporting everything (at the cost of LTO).
+        if(BUILD_CLI)
+            set_target_properties(raw_alchemy_core PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+        else()
+            # FFI build: an explicit .def drives exports. .def files are processed
+            # by the linker directly (no object symbol-table scanning), which is
+            # what makes them LTO-compatible — WINDOWS_EXPORT_ALL_SYMBOLS uses
+            # __create_def to scan COFF symbol tables and cannot parse LTO bitcode.
+            # Pairing the .def with lld-link is what lets ThinLTO actually link:
+            # only lld-link can consume LLVM bitcode objects (MSVC link.exe cannot).
+            target_sources(raw_alchemy_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/raw_alchemy_exports.def)
+        endif()
     endif()
     # Android: set library output name
     if(ANDROID)
@@ -419,12 +463,21 @@ if(UNIX)
     target_link_libraries(raw_alchemy_core PUBLIC m)
 endif()
 
-# OpenMP for parallel processing (optional)
+# OpenMP for parallel processing (optional). On the FFI Windows clang-cl build the
+# libomp resolution is pinned to the standalone LLVM runtime (libomp.dll) above,
+# before LibRaw's own find_package(OpenMP) runs.
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
     target_link_libraries(raw_alchemy_core PUBLIC OpenMP::OpenMP_CXX)
     target_compile_definitions(raw_alchemy_core PUBLIC RA_USE_OPENMP)
     message(STATUS "OpenMP enabled")
+    # Ship the OpenMP runtime next to raw_alchemy_core.dll so the host can
+    # preload it before LoadLibrary-ing the core DLL.
+    if(RA_OPENMP_PINNED)
+        add_custom_command(TARGET raw_alchemy_core POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${RA_LIBOMP_RUNTIME}" "$<TARGET_FILE_DIR:raw_alchemy_core>")
+    endif()
 endif()
 
 # ---- CLI executable ----
@@ -450,69 +503,88 @@ if(BUILD_CLI)
 endif()
 
 # ---- Compiler warnings, optimization & performance tuning ----
+#
+# All targets now use LLVM Clang (clang-cl on Windows, NDK Clang on Android,
+# system Clang/GCC on Linux/macOS). MSVC (cl.exe) is no longer the primary
+# toolchain, so the previous MSVC-vs-Clang branch split is consolidated into a
+# single Clang/GCC path. Note: clang-cl sets CMAKE_CXX_COMPILER_ID=Clang and the
+# MSVC CMake variable to TRUE, so the old `if(MSVC)` discriminator would wrongly
+# route clang-cl through the MSVC branch — compiler ID is used here instead.
 
 # --- 1. Link-Time Optimization (LTO) ---
-# Enables cross-module inlining and whole-program optimization.
-# Safe for all in-tree static libs (LibRaw, libtiff, libexif, lensfun, pugixml, glib_shim).
-# libjpeg-turbo uses ExternalProject; LTO is passed via CMAKE_ARGS below.
+# Enables cross-module inlining and whole-program optimization across all in-tree
+# static libs (LibRaw, libtiff, libexif, lensfun, pugixml, glib_shim). libjpeg-turbo
+# (ExternalProject) receives LTO via CMAKE_ARGS below.
+#
+# Previously disabled on Windows because WINDOWS_EXPORT_ALL_SYMBOLS auto-.def
+# generation cannot parse LTO bitcode. The FFI build (BUILD_CLI=OFF) no longer
+# sets WINDOWS_EXPORT_ALL_SYMBOLS, so LTO works there. The CLI-against-shared
+# path keeps WINDOWS_EXPORT_ALL_SYMBOLS and therefore keeps skipping LTO.
 set(RA_LTO_ENABLED OFF)
-# LTO incompatible with WINDOWS_EXPORT_ALL_SYMBOLS on MSVC (__create_def can't parse LTO objects)
-if(NOT MSVC)
+if(NOT (WIN32 AND BUILD_CLI))
     include(CheckIPOSupported)
     check_ipo_supported(RESULT RA_LTO_ENABLED OUTPUT RA_LTO_ERROR)
     if(RA_LTO_ENABLED AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
-        include(CMakeDependentOption)
         set_target_properties(raw_alchemy_core PROPERTIES
             INTERPROCEDURAL_OPTIMIZATION ON
         )
+    elseif(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+        # Surface the reason instead of silently disabling LTO, so a future
+        # toolchain change that drops lld-link (link.exe can't read LTO bitcode)
+        # is caught immediately rather than degrading performance invisibly.
+        message(WARNING "ThinLTO not enabled: ${RA_LTO_ERROR}")
     endif()
 endif()
 
 # --- 2. Floating-point model (layered per-module safety) ---
 #
 # Module safety analysis:
-#   raw_alchemy_core  — ✅ safe for full -ffast-math (no NaN/Inf/signed-zero deps)
-#   LibRaw            — ⚠️ only safe subset (has division-by-zero guards that break under -ffinite-math-only)
-#   lensfun           — ❌ no fast-math (NaN sentinels, Newton convergence, exact-zero guards)
-#   libtiff           — ❌ no fast-math (NaN self-comparison luma[0]!=luma[0])
-#   libjpeg-turbo     — ✅ safe (integer DCT only)
-#   libexif           — ✅ safe (no precision-sensitive FP)
-#   pugixml           — ✅ safe (has fpclassify fallback)
-#   glib_shim         — ✅ safe (no FP math)
+#   raw_alchemy_core  — safe for full -ffast-math (no NaN/Inf/signed-zero deps)
+#   LibRaw            — safe subset only (division-by-zero guards break under -ffinite-math-only)
+#   lensfun           — no fast-math (NaN sentinels, Newton convergence, exact-zero guards)
+#   libtiff           — no fast-math (NaN self-comparison luma[0]!=luma[0])
+#   libjpeg-turbo     — safe (integer DCT only)
+#   libexif           — safe (no precision-sensitive FP)
+#   pugixml           — safe (has fpclassify fallback)
+#   glib_shim         — safe (no FP math)
 #
-if(MSVC)
-    # MSVC /fp:fast is conservative: does NOT assume finite math,
-    # so it preserves division-by-zero guards. Safe for LibRaw too.
-    target_compile_options(raw_alchemy_core PRIVATE /fp:fast /arch:AVX2 /Ob3)
-    target_compile_options(raw_r PUBLIC /fp:fast)
-    # lensfun & libtiff: no /fp:fast (keep default /fp:precise)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # --- raw_alchemy_core: full -ffast-math ---
-    target_compile_options(raw_alchemy_core PRIVATE -ffast-math)
+# clang-cl's MSVC frontend rejects bare -ffast-math and the granular -fno-*
+# flags ("unknown argument ignored in clang-cl", verified on LLVM 22), so route
+# all of them through /clang: — that forwards them to the GNU-style clang driver
+# with identical semantics. The old MSVC /fp:fast compromise branch is gone.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set(RA_LIBRAW_FP_OPTS /clang:-fno-math-errno /clang:-fno-signed-zeros /clang:-fno-trapping-math)
+    set(RA_CORE_FASTMATH /clang:-ffast-math)
+else()
+    set(RA_LIBRAW_FP_OPTS -fno-math-errno -fno-signed-zeros -fno-trapping-math)
+    set(RA_CORE_FASTMATH -ffast-math)
+endif()
 
-    # --- LibRaw: safe subset only ---
-    # Excludes -ffinite-math-only (would break division-by-zero guards in
-    # cubic_spline, dcb_demosaic, ahd_demosaic) and -fassociative-math
-    # (would change wavelet denoise accumulation order).
-    target_compile_options(raw_r PUBLIC
-        -fno-math-errno
-        -fno-signed-zeros
-        -fno-trapping-math
-    )
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    # raw_alchemy_core: full fast-math
+    target_compile_options(raw_alchemy_core PRIVATE ${RA_CORE_FASTMATH})
 
+    # LibRaw: safe subset — excludes -ffinite-math-only (breaks cubic_spline,
+    # dcb_demosaic, ahd_demosaic div-by-zero guards) and -fassociative-math
+    # (changes wavelet denoise accumulation order).
+    target_compile_options(raw_r PUBLIC ${RA_LIBRAW_FP_OPTS})
     # lensfun & libtiff: no fast-math flags (keep strict FP)
 endif()
 
-# --- 3. Optimization level & platform-specific tuning ---
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    if(ANDROID OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|armv7-a|arm64")
-        # -O3 enables auto-vectorization (NEON on ARM)
-        target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O3)
-    else()
-        # Linux/macOS x64: -O3 for consistent optimization across platforms
-        target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic -O3)
+# --- 3. Architecture tuning & warnings ---
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(raw_alchemy_core PRIVATE -Wall -Wextra -Wpedantic)
+
+    # x86_64: AVX2 auto-vectorization (NEON is always-on on aarch64).
+    # -mavx2 is accepted by clang-cl, regular Clang, and GCC alike, replacing the
+    # MSVC-only /arch:AVX2 and closing the gap where the old GNU|Clang x86_64 path
+    # had no AVX2 enablement at all.
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "[Xx]86_64|[Aa][Mm][Dd]64|[XxIi][0-9]?86")
+        target_compile_options(raw_alchemy_core PRIVATE -mavx2)
     endif()
 endif()
+# Optimization level is driven by CMAKE_BUILD_TYPE (Release -> -O3 on GNU-frontend
+# Clang/GCC, /O2 on clang-cl + VS multi-config), so no explicit -O flag is needed.
 
 # ARM64 float16 support detection (for half-precision bandwidth optimization)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" AND CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -536,12 +608,13 @@ message(STATUS "  Lensfun:    ${RA_LENSFUN_ENABLED}")
     endif()
 message(STATUS "  OpenMP:     ${OpenMP_CXX_FOUND}")
 message(STATUS "  LTO:        ${RA_LTO_ENABLED}")
-if(MSVC)
-    message(STATUS "  Note:       LTO disabled on MSVC (incompatible with WINDOWS_EXPORT_ALL_SYMBOLS)")
-    message(STATUS "  FP model:   /fp:fast (core + LibRaw), /fp:precise (lensfun, libtiff)")
-    message(STATUS "  SIMD:       /arch:AVX2 /Ob3")
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    message(STATUS "  FP model:   -ffast-math (core), safe subset (LibRaw), strict (lensfun, libtiff)")
+message(STATUS "  FP model:   -ffast-math (core), safe subset (LibRaw), strict (lensfun, libtiff)")
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    message(STATUS "  Compiler:   clang-cl (LLVM ${CMAKE_CXX_COMPILER_VERSION})")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(STATUS "  Compiler:   clang (LLVM ${CMAKE_CXX_COMPILER_VERSION})")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    message(STATUS "  Compiler:   gcc (${CMAKE_CXX_COMPILER_VERSION})")
 endif()
 if(ANDROID)
     message(STATUS "  Android:    ${ANDROID_ABI} (API ${ANDROID_PLATFORM_LEVEL})")

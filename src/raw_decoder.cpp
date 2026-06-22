@@ -25,6 +25,7 @@
 
 #include "raw_decoder.h"
 #include "exif_injector.h"
+#include "win_unicode.h"
 
 #include <libraw/libraw.h>
 #include <cstdio>
@@ -124,7 +125,7 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
 
     // --- Open the RAW file ---
 #ifdef _WIN32
-    auto widePath = utf8_to_wide(rawPath);
+    auto widePath = rawalchemy::utf8_to_wide(rawPath);
     int ret = rawProcessor.open_file(widePath.c_str());
 #else
     int ret = rawProcessor.open_file(rawPath.c_str());
@@ -269,7 +270,7 @@ CameraMetadata extractMetadata(const std::string& rawPath) {
     LibRaw rawProcessor;
 
 #ifdef _WIN32
-    auto widePath = utf8_to_wide(rawPath);
+    auto widePath = rawalchemy::utf8_to_wide(rawPath);
     int ret = rawProcessor.open_file(widePath.c_str());
 #else
     int ret = rawProcessor.open_file(rawPath.c_str());

@@ -1,0 +1,16 @@
+LIBRARY raw_alchemy_core
+EXPORTS
+    raImageBufferDestroy
+    raImageGetWidth
+    raImageGetHeight
+    raImageGetData
+    raImageGetDataSizeBytes
+    raProcessFile
+    raProcessFileWithLUT
+    raProcessToBuffer
+    raBeginPreviewSession
+    raApplyPreviewGrading
+    raFreePreviewBuffer
+    raEndPreviewSession
+    raGetLastError
+    raGetVersion
