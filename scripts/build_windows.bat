@@ -26,6 +26,13 @@ setlocal enableextensions
 set "BUILD_TYPE=Release"
 if not "%~1"=="" set "BUILD_TYPE=%~1"
 
+REM Validate BUILD_TYPE: build.rs looks for the DLL under bin/<BUILD_TYPE>/, so a
+REM typo (e.g. "RelWithDebInfo") would silently produce a layout the host can't find.
+if /I not "%BUILD_TYPE%"=="Debug" if /I not "%BUILD_TYPE%"=="Release" (
+    echo ERROR: BUILD_TYPE must be Debug or Release, got "%BUILD_TYPE%".
+    exit /b 1
+)
+
 set "BUILD_DIR=build-windows-dll"
 
 REM Locate the latest Visual Studio installation via vswhere (bundled with VS Installer).

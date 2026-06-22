@@ -32,6 +32,9 @@ endif()
 #
 # find_package(OpenMP) resolves the lib via compiler HINTS that outrank
 # CMAKE_LIBRARY_PATH, so we override its find_library cache var directly with FORCE.
+# The literal name `OpenMP_libomp_LIBRARY` is hardcoded in FindOpenMP.cmake for the
+# `Clang AND WIN32` branch (verified against CMake 3.18–4.3); a future CMake rename
+# would require updating this pin.
 if(WIN32 AND BUILD_SHARED AND NOT BUILD_CLI
         AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
     get_filename_component(_clang_bindir "${CMAKE_CXX_COMPILER}" DIRECTORY)
@@ -42,9 +45,16 @@ if(WIN32 AND BUILD_SHARED AND NOT BUILD_CLI
             "libomp import lib (pinned to standalone LLVM for FFI Windows build)" FORCE)
         set(RA_OPENMP_PINNED TRUE)
     else()
-        message(WARNING "Standalone LLVM libomp not found under ${_llvm_libdir}; "
-                "OpenMP will fall back to the MSVC-bundled runtime "
-                "(libomp140.x86_64.dll), which the host cannot load at runtime.")
+        # Fail fast: a silent fallback to the MSVC-bundled libomp140 would produce
+        # a DLL that builds cleanly but fails to load at runtime on end-user
+        # machines — the exact failure this pin exists to prevent. build_windows.bat
+        # requires a standalone LLVM install, so a missing libomp is a real
+        # misconfiguration, not a graceful-degradation case.
+        message(FATAL_ERROR
+            "Standalone LLVM libomp not found under ${_llvm_libdir}.\n"
+            "The FFI Windows build needs the OpenMP runtime that ships with LLVM "
+            "(libomp.dll, redistributable) so the host can preload it. Reinstall LLVM "
+            "(e.g. winget install LLVM.LLVM) or point OpenMP_libomp_LIBRARY at a libomp.lib.")
     endif()
 endif()
 
