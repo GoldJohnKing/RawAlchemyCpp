@@ -31,6 +31,11 @@
 #include <cstdio>
 #include <cstring>
 
+#include "aligned_allocator.h"
+#include "cfa_lookup.h"
+#include "color_convert.h"
+#include "demosaic.h"
+
 namespace rawalchemy {
 
 // ---- Error helper ----
@@ -52,6 +57,72 @@ static void fixPreInterpolateDimensions(void* ctx) {
     LibRaw* raw = static_cast<LibRaw*>(ctx);
     raw->imgdata.sizes.iheight = raw->imgdata.sizes.height;
     raw->imgdata.sizes.iwidth = raw->imgdata.sizes.width;
+}
+
+// ---- Demosaic snapshot infrastructure ----
+// Thread-local snapshot of LibRaw's pre-demosaic state. Populated by
+// capturePreInterpolateState() at the pre_interpolate_cb hook point (after
+// FBDD/wavelet/WB/highlight recovery, before demosaic). Consumed by the custom
+// demosaic path that replaces LibRaw's built-in interpolation (Task 6+).
+struct DemosaicSnapshot {
+    bool captured = false;
+    bool isXtrans = false;
+    unsigned filters = 0;
+    unsigned char xtrans[6][6] = {};
+    int width = 0;
+    int height = 0;
+    AlignedVector<float> rawCfa;  // single-channel mosaic, preprocessed
+};
+
+// Thread-local because LibRaw processes one image per thread, and the callback
+// signature has no user-data parameter — TLS is the only way to reach the buffer.
+thread_local DemosaicSnapshot g_demosaicSnapshot;
+
+// LibRaw pre_interpolate_cb: snapshots preprocessed CFA data before demosaic.
+// Also applies the iheight/iwidth bug fix (same as fixPreInterpolateDimensions
+// above), so Task 6 can swap the callback assignment without losing the workaround.
+//
+// Note: not yet wired into decodeRaw(); the assignment swap is Task 6.
+static void capturePreInterpolateState(void* ctx) {
+    LibRaw* raw = static_cast<LibRaw*>(ctx);
+
+    // Preserve existing bug fix (see fixPreInterpolateDimensions above)
+    raw->imgdata.sizes.iheight = raw->imgdata.sizes.height;
+    raw->imgdata.sizes.iwidth = raw->imgdata.sizes.width;
+
+    // Capture only once per decode (LibRaw may invoke the hook multiple times)
+    if (g_demosaicSnapshot.captured) return;
+
+    auto& img = raw->imgdata;
+    int w = static_cast<int>(img.sizes.width);
+    int h = static_cast<int>(img.sizes.height);
+
+    g_demosaicSnapshot.isXtrans = isXtrans(img.idata.filters);
+    g_demosaicSnapshot.filters = img.idata.filters;
+    if (g_demosaicSnapshot.isXtrans) {
+        std::memcpy(g_demosaicSnapshot.xtrans, img.idata.xtrans, 36);
+    }
+    g_demosaicSnapshot.width = w;
+    g_demosaicSnapshot.height = h;
+
+    const size_t pixelCount = static_cast<size_t>(w) * h;
+    g_demosaicSnapshot.rawCfa.resize(pixelCount);
+
+    // WARNING: imgdata.image is `ushort (*)[4]` in this LibRaw version
+    // (libraw_types.h:1115), NOT float. extractCfaFromImage() expects
+    // `const float (*)[4]` (Task 4). The reinterpret_cast below compiles but
+    // reinterprets 16-bit ushort bit patterns as float — UB, garbage at runtime.
+    // This MUST be resolved (ushort->float conversion or signature change) before
+    // Task 6 wires this callback in. See task-5-report.md concern #1.
+    const float (*image)[4] = reinterpret_cast<const float (*)[4]>(img.image);
+    extractCfaFromImage(image, w, h, img.idata.filters,
+                        g_demosaicSnapshot.isXtrans ? g_demosaicSnapshot.xtrans : nullptr,
+                        g_demosaicSnapshot.rawCfa.data());
+
+    g_demosaicSnapshot.captured = true;
+    std::fprintf(stderr,
+                 "[rawalchemy] Demosaic snapshot captured: %dx%d, xtrans=%d\n",
+                 w, h, g_demosaicSnapshot.isXtrans ? 1 : 0);
 }
 
 // LibRaw::callbacks is protected — expose via subclass.
