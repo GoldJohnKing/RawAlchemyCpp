@@ -38,6 +38,12 @@
 
 namespace rawalchemy {
 
+// Forward declarations — definitions live in demosaic_dispatch.cpp today
+// (bilinear stubs); real RCD and Markesteijn ports arrive in Tasks 9 and 13.
+void rcd_demosaic(const float* in, float* out, int w, int h, unsigned filters);
+void markesteijn_demosaic(const float* in, float* out, int w, int h,
+                           const unsigned char xtrans[6][6]);
+
 // ---- Error helper ----
 static void throwLibRawError(int ret, const char* context) {
     throw std::runtime_error(
@@ -80,49 +86,80 @@ thread_local DemosaicSnapshot g_demosaicSnapshot;
 
 // LibRaw pre_interpolate_cb: snapshots preprocessed CFA data before demosaic.
 // Also applies the iheight/iwidth bug fix (same as fixPreInterpolateDimensions
-// above), so Task 6 can swap the callback assignment without losing the workaround.
-//
-// Note: not yet wired into decodeRaw(); the assignment swap is Task 6.
+// above), so the demosaicAlgorithm branch in decodeRaw() can swap the callback
+// assignment without losing the workaround.
 static void capturePreInterpolateState(void* ctx) {
     LibRaw* raw = static_cast<LibRaw*>(ctx);
 
-    // Preserve existing bug fix (see fixPreInterpolateDimensions above)
+    // Preserve existing bug fix (see fixPreInterpolateDimensions above).
+    // Runs unconditionally — the dimension correction is needed whether or not
+    // snapshot capture succeeds, and must not be skipped by an exception.
     raw->imgdata.sizes.iheight = raw->imgdata.sizes.height;
     raw->imgdata.sizes.iwidth = raw->imgdata.sizes.width;
 
     // Capture only once per decode (LibRaw may invoke the hook multiple times)
     if (g_demosaicSnapshot.captured) return;
 
-    auto& img = raw->imgdata;
-    int w = static_cast<int>(img.sizes.width);
-    int h = static_cast<int>(img.sizes.height);
+    // Wrap the capture body so a failure (bad alloc, LibRaw state surprise) falls
+    // back to LibRaw's own demosaic instead of propagating a C++ exception through
+    // LibRaw's C-style internals.
+    try {
+        auto& img = raw->imgdata;
+        int w = static_cast<int>(img.sizes.width);
+        int h = static_cast<int>(img.sizes.height);
 
-    g_demosaicSnapshot.isXtrans = isXtrans(img.idata.filters);
-    g_demosaicSnapshot.filters = img.idata.filters;
-    if (g_demosaicSnapshot.isXtrans) {
-        std::memcpy(g_demosaicSnapshot.xtrans, img.idata.xtrans, 36);
+        g_demosaicSnapshot.isXtrans = isXtrans(img.idata.filters);
+        g_demosaicSnapshot.filters = img.idata.filters;
+        if (g_demosaicSnapshot.isXtrans) {
+            std::memcpy(g_demosaicSnapshot.xtrans, img.idata.xtrans, 36);
+        }
+        g_demosaicSnapshot.width = w;
+        g_demosaicSnapshot.height = h;
+
+        const size_t pixelCount = static_cast<size_t>(w) * h;
+        g_demosaicSnapshot.rawCfa.resize(pixelCount);
+
+        // LibRaw stores imgdata.image as ushort (*)[4] (libraw_types.h:1115),
+        // NOT float. Task 5's cast to float(*)[4] was UB; we read the native
+        // ushort and normalize to float [0,1] inline. extractCfaFromImage() is
+        // intentionally untouched (Task 4 tests still consume float input).
+        const unsigned short (*image)[4] =
+            reinterpret_cast<const unsigned short (*)[4]>(img.image);
+
+        if (!image) {
+            std::fprintf(stderr,
+                         "[rawalchemy] Demosaic snapshot: imgdata.image is null, skipping\n");
+            return;  // captured stays false -> decodeRaw falls back to LibRaw output
+        }
+
+        // Extract single-channel CFA with ushort->float normalization.
+        for (int row = 0; row < h; ++row) {
+            for (int col = 0; col < w; ++col) {
+                unsigned c;
+                if (g_demosaicSnapshot.isXtrans) {
+                    c = xtransColor(row, col, g_demosaicSnapshot.xtrans);
+                } else {
+                    c = bayerColor(row, col, g_demosaicSnapshot.filters);
+                }
+                g_demosaicSnapshot.rawCfa[static_cast<size_t>(row) * w + col] =
+                    static_cast<float>(image[static_cast<size_t>(row) * w + col][c]) / 65535.0f;
+            }
+        }
+
+        g_demosaicSnapshot.captured = true;
+        std::fprintf(stderr,
+                     "[rawalchemy] Demosaic snapshot captured: %dx%d, xtrans=%d\n",
+                     w, h, g_demosaicSnapshot.isXtrans ? 1 : 0);
+    } catch (const std::exception& e) {
+        std::fprintf(stderr,
+                     "[rawalchemy] Demosaic snapshot failed: %s (falling back to LibRaw demosaic)\n",
+                     e.what());
+        g_demosaicSnapshot.captured = false;
+    } catch (...) {
+        std::fprintf(stderr,
+                     "[rawalchemy] Demosaic snapshot failed: unknown error (falling back to LibRaw demosaic)\n");
+        g_demosaicSnapshot.captured = false;
     }
-    g_demosaicSnapshot.width = w;
-    g_demosaicSnapshot.height = h;
-
-    const size_t pixelCount = static_cast<size_t>(w) * h;
-    g_demosaicSnapshot.rawCfa.resize(pixelCount);
-
-    // WARNING: imgdata.image is `ushort (*)[4]` in this LibRaw version
-    // (libraw_types.h:1115), NOT float. extractCfaFromImage() expects
-    // `const float (*)[4]` (Task 4). The reinterpret_cast below compiles but
-    // reinterprets 16-bit ushort bit patterns as float — UB, garbage at runtime.
-    // This MUST be resolved (ushort->float conversion or signature change) before
-    // Task 6 wires this callback in. See task-5-report.md concern #1.
-    const float (*image)[4] = reinterpret_cast<const float (*)[4]>(img.image);
-    extractCfaFromImage(image, w, h, img.idata.filters,
-                        g_demosaicSnapshot.isXtrans ? g_demosaicSnapshot.xtrans : nullptr,
-                        g_demosaicSnapshot.rawCfa.data());
-
-    g_demosaicSnapshot.captured = true;
-    std::fprintf(stderr,
-                 "[rawalchemy] Demosaic snapshot captured: %dx%d, xtrans=%d\n",
-                 w, h, g_demosaicSnapshot.isXtrans ? 1 : 0);
 }
 
 // LibRaw::callbacks is protected — expose via subclass.
@@ -166,12 +203,33 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     // Highlight recovery: 2 = Blend mode (prevents highlight clipping)
     p.highlight = params.highlightMode;
 
-    // Demosaic algorithm quality
-    p.user_qual = params.demosaicQuality;
-
-    // Half-size mode (optional, for fast preview)
+    // Half-size mode (optional, for fast preview) — bypasses our custom demosaic
+    // because LibRaw downsamples before the pre_interpolate hook fires.
     if (params.halfSize) {
         p.half_size = 1;
+    }
+
+    // Determine whether to use our custom demosaic or LibRaw's built-in path.
+    // LIBRAW_FALLBACK and half_size mode both delegate to LibRaw unchanged.
+    const bool useCustomDemosaic = !params.halfSize && (
+        params.demosaicAlgorithm == DemosaicAlgorithm::RCD ||
+        params.demosaicAlgorithm == DemosaicAlgorithm::MARKESTEIJN_3PASS ||
+        params.demosaicAlgorithm == DemosaicAlgorithm::AUTO
+    );
+
+    if (useCustomDemosaic) {
+        // Run LibRaw preprocessing (FBDD/wavelet/WB/highlight) but use the cheapest
+        // demosaic as a placeholder — its output is discarded and replaced by our
+        // custom demosaic built from the pre-interpolate snapshot.
+        p.user_qual = 0;  // bilinear (fastest)
+        // Reset snapshot state for this decode (clears stale thread-local data)
+        g_demosaicSnapshot = DemosaicSnapshot{};
+        // Register our snapshot callback (also applies the iheight/iwidth bug fix)
+        rawProcessor.callbacks.pre_interpolate_cb = capturePreInterpolateState;
+    } else {
+        // Original LibRaw path
+        p.user_qual = params.demosaicQuality;
+        rawProcessor.callbacks.pre_interpolate_cb = fixPreInterpolateDimensions;
     }
 
     // Green channel matching (G1/G3 equalization)
@@ -249,15 +307,49 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         p.fbdd_noiserd = params.fbddNoiserd;
     }
 
-    // Register workaround for LibRaw iheight/iwidth bug (see fixPreInterpolateDimensions).
-    // This callback runs after pre_interpolate() but before demosaic, ensuring
-    // iheight/iwidth match the actual buffer dimensions.
-    rawProcessor.callbacks.pre_interpolate_cb = fixPreInterpolateDimensions;
-
     // --- Process (demosaic + color conversion + gamma) ---
     ret = rawProcessor.dcraw_process();
     if (ret != LIBRAW_SUCCESS) {
         throwLibRawError(ret, "dcraw_process");
+    }
+
+    // --- Custom demosaic path ---
+    // If the pre_interpolate callback captured the CFA, run our demosaic and
+    // bypass LibRaw's interpolated output entirely. Falls through to the LibRaw
+    // extraction below when capture was skipped (half_size, null image, exception,
+    // or LIBRAW_FALLBACK algorithm).
+    if (useCustomDemosaic && g_demosaicSnapshot.captured) {
+        auto& snap = g_demosaicSnapshot;
+        const size_t pixelCount = static_cast<size_t>(snap.width) * snap.height;
+
+        // Planar RGB output: [R plane | G plane | B plane]
+        AlignedVector<float> planarRgb(3 * pixelCount);
+
+        // Dispatch to the appropriate algorithm based on CFA type
+        if (snap.isXtrans) {
+            if (params.demosaicAlgorithm == DemosaicAlgorithm::RCD) {
+                throw std::runtime_error(
+                    "RCD demosaic requested but input is X-Trans; "
+                    "use MARKESTEIJN_3PASS or AUTO");
+            }
+            markesteijn_demosaic(snap.rawCfa.data(), planarRgb.data(),
+                                  snap.width, snap.height, snap.xtrans);
+        } else {
+            if (params.demosaicAlgorithm == DemosaicAlgorithm::MARKESTEIJN_3PASS) {
+                throw std::runtime_error(
+                    "MARKESTEIJN_3PASS requested but input is Bayer; "
+                    "use RCD or AUTO");
+            }
+            rcd_demosaic(snap.rawCfa.data(), planarRgb.data(),
+                          snap.width, snap.height, snap.filters);
+        }
+
+        // Apply camera-RGB -> ProPhoto matrix from LibRaw
+        applyCameraToProPhoto(planarRgb.data(), snap.width, snap.height,
+                              rawProcessor.imgdata.color.rgb_cam);
+
+        // Convert planar -> interleaved ImageBuffer and return
+        return interleavePlanarRgb(planarRgb.data(), snap.width, snap.height);
     }
 
     // --- Extract processed image ---

@@ -371,6 +371,7 @@ endif()
 # ---- Library target ----
 set(RA_LIBRARY_SOURCES
     src/raw_decoder.cpp
+    src/demosaic_dispatch.cpp
     src/tiff_writer.cpp
     src/jpeg_writer.cpp
     src/image_resize.cpp
