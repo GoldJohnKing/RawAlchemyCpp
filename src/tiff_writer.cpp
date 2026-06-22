@@ -13,17 +13,13 @@
 
 #include "tiff_writer.h"
 #include "icc_srgb.h"
+#include "win_unicode.h"
 
 #include <tiffio.h>
 #include <cstdio>
 #include <cstring>
 #include <vector>
 #include <algorithm>
-
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 namespace rawalchemy {
 
@@ -112,12 +108,8 @@ bool writeTiff16(const ImageBuffer& img, const std::string& outPath) {
     // Open TIFF for writing
     TIFF* tif = nullptr;
 #ifdef _WIN32
-    {
-        int sz = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
-        std::wstring wpath(static_cast<size_t>(sz - 1), 0);
-        MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], sz);
-        tif = TIFFOpenW(wpath.c_str(), "w");
-    }
+    auto wpath = rawalchemy::utf8_to_wide(outPath);
+    tif = TIFFOpenW(wpath.c_str(), "w");
 #else
     tif = TIFFOpen(outPath.c_str(), "w");
 #endif
@@ -154,12 +146,8 @@ bool writeTiff16(const ImageBuffer& img, const std::string& outPath) {
         // Reopen
         tif = nullptr;
 #ifdef _WIN32
-        {
-            int sz = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
-            std::wstring wpath(static_cast<size_t>(sz - 1), 0);
-            MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], sz);
-            tif = TIFFOpenW(wpath.c_str(), "w");
-        }
+        auto wpath = rawalchemy::utf8_to_wide(outPath);
+        tif = TIFFOpenW(wpath.c_str(), "w");
 #else
         tif = TIFFOpen(outPath.c_str(), "w");
 #endif
@@ -192,12 +180,8 @@ bool writeTiff16Uncompressed(const ImageBuffer& img, const std::string& outPath)
 
     TIFF* tif = nullptr;
 #ifdef _WIN32
-    {
-        int sz = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
-        std::wstring wpath(static_cast<size_t>(sz - 1), 0);
-        MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], sz);
-        tif = TIFFOpenW(wpath.c_str(), "w");
-    }
+    auto wpath = rawalchemy::utf8_to_wide(outPath);
+    tif = TIFFOpenW(wpath.c_str(), "w");
 #else
     tif = TIFFOpen(outPath.c_str(), "w");
 #endif

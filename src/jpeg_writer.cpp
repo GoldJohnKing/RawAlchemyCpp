@@ -13,15 +13,11 @@
 #include "jpeg_writer.h"
 #include "exif_injector.h"
 #include "icc_srgb.h"
+#include "win_unicode.h"
 
 #include <cstdio>
 #include <vector>
 #include <algorithm>
-
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-#endif
 
 #include <turbojpeg.h>
 
@@ -113,12 +109,8 @@ bool writeJpeg(const ImageBuffer& img, const std::string& outPath,
     }
 
 #ifdef _WIN32
-    {
-        int size = MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, nullptr, 0);
-        std::wstring wpath(static_cast<size_t>(size - 1), 0);
-        MultiByteToWideChar(CP_UTF8, 0, outPath.c_str(), -1, &wpath[0], size);
-        fp = _wfopen(wpath.c_str(), L"wb");
-    }
+    auto wpath = rawalchemy::utf8_to_wide(outPath);
+    fp = _wfopen(wpath.c_str(), L"wb");
 #else
     fp = fopen(outPath.c_str(), "wb");
 #endif

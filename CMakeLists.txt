@@ -343,6 +343,7 @@ set(RA_LIBRARY_SOURCES
     src/stylize.cpp
     src/lens_correction.cpp
     src/exif_injector.cpp
+    src/win_unicode.cpp
 )
 
 # Add C API sources when building the C API

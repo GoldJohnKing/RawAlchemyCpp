@@ -30,21 +30,6 @@
 #include <cstdio>
 #include <cstring>
 
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-namespace {
-    std::wstring utf8_to_wide(const std::string& utf8) {
-        if (utf8.empty()) return std::wstring();
-        int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
-        if (size <= 0) return std::wstring();
-        std::wstring wide(static_cast<size_t>(size - 1), 0);
-        MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wide[0], size);
-        return wide;
-    }
-}
-#endif
-
 namespace rawalchemy {
 
 // ---- Error helper ----
