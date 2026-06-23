@@ -42,9 +42,11 @@ inline unsigned bayerColor(int row, int col, unsigned filters) {
 }
 
 /// Get the color channel index (0=R, 1=G, 2=B) for an X-Trans CFA pixel.
-/// `xtrans` is the 6x6 pattern array from LibRaw's imgdata.idata.xtrans.
+/// `xtrans` is the 6×6 pattern array from LibRaw's imgdata.idata.xtrans.
+/// Uses double-modulo to handle negative row/col correctly (C++ % can return
+/// negative for negative operands, which would index out of bounds).
 inline unsigned xtransColor(int row, int col, const unsigned char xtrans[6][6]) {
-    return xtrans[(row + 6) % 6][(col + 6) % 6];
+    return xtrans[((row % 6) + 6) % 6][((col % 6) + 6) % 6];
 }
 
 /// True if the LibRaw filters value indicates an X-Trans sensor.
