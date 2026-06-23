@@ -17,22 +17,37 @@
 
 namespace rawalchemy {
 
-/// Apply camera-RGB → output-RGB color matrix (3x3 subset of LibRaw's rgb_cam[3][4]).
-/// Operates in-place on planar RGB float data: [R plane | G plane | B plane].
-///
-/// LibRaw populates imgdata.color.rgb_cam[3][4] where the 4 columns are R,G,G,B
-/// (two greens). After LibRaw's mix_green, both green columns are identical,
-/// so we use only columns 0,1,2 (R,G,B).
-///
-/// @param planarRgb  float[3*w*h], layout: [R(w*h) | G(w*h) | B(w*h)]
-/// @param w, h       image dimensions
-/// @param rgb_cam    3x4 matrix from LibRaw (we use the 3x3 R,G,B subset)
+/// ProPhoto RGB primaries in XYZ (D65-adapted).
+/// Matches LibRaw's LibRaw_constants::prophoto_rgb (colorconst.cpp:38-41).
+/// LibRaw's convert_to_rgb() multiplies this by rgb_cam to produce the
+/// final camera→ProPhoto matrix (postprocessing_utils_dcrdefs.cpp:98-101).
+static constexpr double PROPHOTO_RGB[3][3] = {
+    {0.529317, 0.330092, 0.140588},
+    {0.098368, 0.873465, 0.028169},
+    {0.016879, 0.117663, 0.865457}
+};
+
+/// Compute camera→ProPhoto matrix matching LibRaw's convert_to_rgb().
+/// rgb_cam alone maps camera→sRGB; multiplying by prophoto_rgb converts
+/// to ProPhoto, which is what the downstream pipeline expects.
+inline void computeProPhotoMatrix(const float rgb_cam[3][4], float out_cam[3][4]) {
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) {
+            out_cam[i][j] = 0.0f;
+            for (int k = 0; k < 3; k++)
+                out_cam[i][j] += static_cast<float>(PROPHOTO_RGB[i][k] * rgb_cam[k][j]);
+        }
+    for (int i = 0; i < 3; i++)
+        out_cam[i][3] = rgb_cam[i][3];
+}
+
+/// Apply a 3×3 color matrix (from a 3×4 array) to planar RGB data, in-place.
 inline void applyCameraToProPhoto(float* planarRgb, int w, int h,
-                                   const float rgb_cam[3][4]) {
+                                   const float matrix[3][4]) {
     const size_t n = static_cast<size_t>(w) * h;
-    const float m00 = rgb_cam[0][0], m01 = rgb_cam[0][1], m02 = rgb_cam[0][2];
-    const float m10 = rgb_cam[1][0], m11 = rgb_cam[1][1], m12 = rgb_cam[1][2];
-    const float m20 = rgb_cam[2][0], m21 = rgb_cam[2][1], m22 = rgb_cam[2][2];
+    const float m00 = matrix[0][0], m01 = matrix[0][1], m02 = matrix[0][2];
+    const float m10 = matrix[1][0], m11 = matrix[1][1], m12 = matrix[1][2];
+    const float m20 = matrix[2][0], m21 = matrix[2][1], m22 = matrix[2][2];
 
     #pragma omp simd
     for (size_t i = 0; i < n; ++i) {

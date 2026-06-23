@@ -344,9 +344,13 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
                           snap.width, snap.height, snap.filters);
         }
 
-        // Apply camera-RGB -> ProPhoto matrix from LibRaw
-        applyCameraToProPhoto(planarRgb.data(), snap.width, snap.height,
-                              rawProcessor.imgdata.color.rgb_cam);
+        // Apply camera-RGB → ProPhoto matrix.
+        // Must replicate LibRaw's convert_to_rgb(): out_cam = prophoto_rgb × rgb_cam.
+        // Using rgb_cam alone produces sRGB, not ProPhoto, causing wrong colors
+        // in the downstream LUT/grading pipeline.
+        float out_cam[3][4];
+        computeProPhotoMatrix(rawProcessor.imgdata.color.rgb_cam, out_cam);
+        applyCameraToProPhoto(planarRgb.data(), snap.width, snap.height, out_cam);
 
         // Convert planar -> interleaved ImageBuffer and return
         return interleavePlanarRgb(planarRgb.data(), snap.width, snap.height);
