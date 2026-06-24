@@ -218,7 +218,13 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     // --- ISO-adaptive noise reduction ---
     float iso = rawProcessor.imgdata.other.iso_speed;
 
-    if (params.denoiseThreshold < 0.0f) {
+    // X-Trans: wavelet_denoise() inside scale_colors() is Bayer-specific and
+    // produces horizontal banding on X-Trans CFA. FBDD also requires Bayer.
+    // Disable both for X-Trans.
+    if (isXtransFile) {
+        p.threshold = 0;
+        p.fbdd_noiserd = 0;
+    } else if (params.denoiseThreshold < 0.0f) {
         if (iso <= 100.0f) {
             p.threshold = 0;
         } else if (iso <= 400.0f) {
