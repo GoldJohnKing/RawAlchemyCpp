@@ -55,10 +55,6 @@
 #include "aligned_allocator.h"
 #include "cfa_lookup.h"
 
-// Disable fast-math for this file: the Markesteijn homogeneity comparison
-// (drv[d][...] <= tr) is sensitive to FP reassociation that -ffast-math
-// permits. clang-cl's -ffast-math is more aggressive than GCC's, producing
-// different rounding that causes visible banding and color spots.
 
 #include <algorithm>
 #include <cmath>
@@ -116,7 +112,7 @@ inline const short* hexLookup(int row, int col,
 // X-Trans-aware 3x3 averaging for the outer rim and sub-tile-sized images.
 // Replaces darktable's _vng_lininterpolate() call. Writes planar RGB.
 void borderInterpolateXtrans(const float* in, float* out, int w, int h,
-                              const unsigned char xtrans[6][6]) {
+                              const char xtrans[6][6]) {
     const size_t plane = static_cast<size_t>(w) * static_cast<size_t>(h);
     for (int row = 0; row < h; ++row) {
         for (int col = 0; col < w; ++col) {
@@ -155,7 +151,7 @@ void borderInterpolateXtrans(const float* in, float* out, int w, int h,
 } // namespace
 
 void markesteijn_demosaic(const float* in, float* out, int w, int h,
-                           const unsigned char xtrans[6][6]) {
+                           const char xtrans[6][6]) {
     if (!in || !out || w <= 0 || h <= 0 || !xtrans) return;
 
     // Stage 0: CFA-aware border fill. The tile loop overwrites the interior

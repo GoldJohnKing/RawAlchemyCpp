@@ -64,7 +64,7 @@ static AlignedVector<float> extractCfa(const unsigned short (*image)[4],
             if (xt) {
                 c = xtransColor(row, col, raw.imgdata.idata.xtrans);
             } else {
-                c = detail::fcColor(row, col, raw.imgdata.idata.filters);
+                c = bayerColor(row, col, raw.imgdata.idata.filters);
             }
             cfa[static_cast<size_t>(row) * w + col] =
                 static_cast<float>(image[static_cast<size_t>(row) * w + col][c]) / 65535.0f;

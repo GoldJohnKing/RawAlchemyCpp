@@ -85,7 +85,7 @@ inline ImageBuffer interleavePlanarRgb(const float* planarRgb, int w, int h) {
 /// @param xtrans    X-Trans pattern (only used if filters == 9)
 /// @param out       output buffer, float[w*h], single-channel mosaic
 inline void extractCfaFromImage(const float (*image)[4], int w, int h,
-                                 unsigned filters, const unsigned char xtrans[6][6],
+                                 unsigned filters, const char xtrans[6][6],
                                  float* out) {
     if (isXtrans(filters)) {
         for (int row = 0; row < h; ++row) {

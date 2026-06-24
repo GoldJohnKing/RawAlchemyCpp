@@ -68,6 +68,6 @@ constexpr int MJK_PAD_HOMO = 15;
 /// @param xtrans  6x6 X-Trans pattern (from LibRaw imgdata.idata.xtrans;
 ///                values are 0=Red, 1=Green, 2=Blue)
 void markesteijn_demosaic(const float* in, float* out, int w, int h,
-                           const unsigned char xtrans[6][6]);
+                           const char xtrans[6][6]);
 
 } // namespace rawalchemy
