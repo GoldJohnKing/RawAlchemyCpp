@@ -213,17 +213,16 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
 
     // Green matching: disable for X-Trans (LibRaw's implementation is
     // Bayer-only; running it on X-Trans corrupts the green channel).
-    p.green_matching = (params.greenMatching && !isXtransFile) ? 1 : 0;
+    p.green_matching = params.greenMatching ? 1 : 0;
 
     // --- ISO-adaptive noise reduction ---
     float iso = rawProcessor.imgdata.other.iso_speed;
 
-    // X-Trans: wavelet_denoise() inside scale_colors() is Bayer-specific and
-    // produces horizontal banding on X-Trans CFA. FBDD also requires Bayer.
-    // Disable both for X-Trans.
+    // X-Trans: wavelet_denoise() inside scale_colors() is designed for Bayer's
+    // 2x2 grid. Applied to X-Trans's 6x6 CFA, it produces row-dependent
+    // wavelet artifacts that manifest as visible horizontal banding.
     if (isXtransFile) {
         p.threshold = 0;
-        p.fbdd_noiserd = 0;
     } else if (params.denoiseThreshold < 0.0f) {
         if (iso <= 100.0f) {
             p.threshold = 0;
@@ -240,6 +239,8 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     if (params.fbddNoiserd < 0) {
+        // Note: LibRaw internally guards FBDD with "filters > 1000" (dcraw_process.cpp:169),
+        // so FBDD never runs for X-Trans (filters == 9) regardless of this setting.
         if (iso <= 100.0f) {
             p.fbdd_noiserd = 0;
         } else if (iso < 3200.0f) {
