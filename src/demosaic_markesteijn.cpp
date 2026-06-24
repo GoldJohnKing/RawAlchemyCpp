@@ -55,6 +55,11 @@
 #include "aligned_allocator.h"
 #include "cfa_lookup.h"
 
+// Disable fast-math for this file: the Markesteijn homogeneity comparison
+// (drv[d][...] <= tr) is sensitive to FP reassociation that -ffast-math
+// permits. clang-cl's -ffast-math is more aggressive than GCC's, producing
+// different rounding that causes visible banding and color spots.
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -643,5 +648,6 @@ void markesteijn_demosaic(const float* in, float* out, int w, int h,
         } // end outer tile loop
     } // end parallel region
 }
+
 
 } // namespace rawalchemy

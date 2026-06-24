@@ -211,6 +211,8 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
 
     // Determine whether to use our custom demosaic or LibRaw's built-in path.
     // LIBRAW_FALLBACK and half_size mode both delegate to LibRaw unchanged.
+    // Determine whether to use our custom demosaic or LibRaw's built-in path.
+    const bool isXtransFile = (rawProcessor.imgdata.idata.filters == 9);
     const bool useCustomDemosaic = !params.halfSize && (
         params.demosaicAlgorithm == DemosaicAlgorithm::RCD ||
         params.demosaicAlgorithm == DemosaicAlgorithm::MARKESTEIJN_3PASS ||
@@ -233,7 +235,11 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     // Green channel matching (G1/G3 equalization)
-    p.green_matching = params.greenMatching ? 1 : 0;
+    // Green matching equilibrates Gr/Gb channels. It is designed for Bayer CFA
+    // only — LibRaw's implementation uses FC() (which returns 0 for X-Trans
+    // filters==9) and accesses channel 3 (always zero for X-Trans). Running it
+    // on X-Trans data corrupts the green channel, causing horizontal banding.
+    p.green_matching = (params.greenMatching && !isXtransFile) ? 1 : 0;
 
     // Mix green: average G1/G3 into single channel, forces P1.colors=3.
     // Without this, some sensors output 4-channel RGBG which breaks
@@ -314,10 +320,6 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     // --- Custom demosaic path ---
-    // If the pre_interpolate callback captured the CFA, run our demosaic and
-    // bypass LibRaw's interpolated output entirely. Falls through to the LibRaw
-    // extraction below when capture was skipped (half_size, null image, exception,
-    // or LIBRAW_FALLBACK algorithm).
     if (useCustomDemosaic && g_demosaicSnapshot.captured) {
         auto& snap = g_demosaicSnapshot;
         const size_t pixelCount = static_cast<size_t>(snap.width) * snap.height;
