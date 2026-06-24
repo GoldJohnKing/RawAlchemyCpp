@@ -24,8 +24,21 @@
 // Forward declarations
 #include "demosaic_rcd.h"
 #include "demosaic_markesteijn.h"
+#include "denoise_xtrans.h"
 
 namespace rawalchemy {
+
+// ---- X-Trans denoise config (set before dcraw_process, read in the callback) ----
+// denoiseXtransPreWB (the pre_scalecolors_cb hook) is a plain C callback
+// void(void*); it cannot receive DecodeParams. decodeRaw fills this
+// synchronously right before dcraw_process() fires the callback, so it is
+// scoped to a single decode.
+struct XtransDenoiseConfig {
+    float threshold = 0.0f;  // darktable domain; 0.0 = skip denoise
+};
+namespace {
+thread_local XtransDenoiseConfig tl_xtransDenoise;
+} // namespace
 
 // ---- Error helper ----
 static void throwLibRawError(int ret, const char* context) {
@@ -90,6 +103,25 @@ static void writeBackRgb(unsigned short (*image)[4],
     }
 }
 
+/// Write a denoised single-channel CFA mosaic back into LibRaw's 4-channel
+/// image[] buffer, at each pixel's CFA channel only. Inverse of extractCfa();
+/// used by the pre-WB denoise callback.
+static void writeBackCfa(unsigned short (*image)[4], const float* cfa,
+                          int w, int h, const LibRaw& raw) {
+    const bool xt = (raw.imgdata.idata.filters == 9);
+    auto clamp = [](float v) -> unsigned short {
+        return static_cast<unsigned short>(
+            std::max(0.0f, std::min(65535.0f, v * 65535.0f)));
+    };
+    for (int row = 0; row < h; ++row)
+        for (int col = 0; col < w; ++col) {
+            const unsigned c = xt ? xtransColor(row, col, raw.imgdata.idata.xtrans)
+                                  : bayerColor(row, col, raw.imgdata.idata.filters);
+            const size_t i = static_cast<size_t>(row) * w + col;
+            image[i][c] = clamp(cfa[i]);
+        }
+}
+
 /// Bayer custom demosaic callback (LibRaw interpolate_bayer_cb).
 /// Reads CFA from image[], runs RCD, writes full RGB back.
 static void customBayerDemosaic(void* ctx) {
@@ -130,6 +162,32 @@ static void customXtransDemosaic(void* ctx) {
     markesteijn_demosaic(cfa.data(), rgb.data(), w, h, img.idata.xtrans);
 
     writeBackRgb(image, rgb.data(), w, h);
+}
+
+/// Pre-WB X-Trans denoise callback (LibRaw pre_scalecolors_cb). Fires after
+/// black-subtract / adjust_maximum / green_matching but BEFORE scale_colors
+/// (white balance). imgdata.image[] here is black-subtracted raw CFA — the same
+/// domain darktable's rawdenoise operates in, so the sqrt variance stabilizer
+/// and noise-floor constants are correctly calibrated. No-op for Bayer and for
+/// X-Trans when the threshold is <= 0.
+static void denoiseXtransPreWB(void* ctx) {
+    LibRaw* raw = static_cast<LibRaw*>(ctx);
+    auto& img = raw->imgdata;
+    if (!isXtrans(img.idata.filters)) return;
+    if (tl_xtransDenoise.threshold <= 0.0f) return;
+
+    int w = static_cast<int>(img.sizes.width);
+    int h = static_cast<int>(img.sizes.height);
+    auto (*image)[4] = reinterpret_cast<unsigned short (*)[4]>(img.image);
+    if (!image) return;
+
+    // in/out must not alias across channels (see denoise_xtrans contract), so
+    // denoise into a fresh buffer then write back to the CFA channel positions.
+    auto cfa = extractCfa(image, w, h, *raw);
+    AlignedVector<float> denoised(static_cast<size_t>(w) * h);
+    denoise_xtrans(cfa.data(), denoised.data(), w, h,
+                   img.idata.xtrans, tl_xtransDenoise.threshold);
+    writeBackCfa(image, denoised.data(), w, h, *raw);
 }
 
 /// Pre-interpolate callback: just fixes iheight/iwidth (wavelet denoise bug).
@@ -199,6 +257,10 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
 
     // Always fix iheight/iwidth (wavelet denoise bug workaround)
     rawProcessor.callbacks.pre_interpolate_cb = preInterpolateFix;
+    // X-Trans pre-WB wavelet denoise (darktable port). Self-gates inside the
+    // callback: no-op for Bayer and when threshold <= 0. Registered for ALL
+    // files so X-Trans denoise works even in LIBRAW_FALLBACK demosaic mode.
+    rawProcessor.callbacks.pre_scalecolors_cb = denoiseXtransPreWB;
 
     if (useCustomDemosaic) {
         // Register our custom demosaic callbacks. LibRaw will call the
@@ -218,12 +280,19 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     // --- ISO-adaptive noise reduction ---
     float iso = rawProcessor.imgdata.other.iso_speed;
 
-    // X-Trans: wavelet_denoise() inside scale_colors() is designed for Bayer's
-    // 2x2 grid. Applied to X-Trans's 6x6 CFA, it produces row-dependent
-    // wavelet artifacts that manifest as visible horizontal banding.
+    // X-Trans: LibRaw's wavelet_denoise() inside scale_colors() is designed for
+    // Bayer's 2x2 grid; applied to X-Trans's 6x6 CFA it produces row-dependent
+    // wavelet artifacts (horizontal banding), so it stays disabled. Our own
+    // darktable-ported channel-separated wavelet runs earlier, in the
+    // pre_scalecolors_cb hook (before white balance — see Step 6).
     if (isXtransFile) {
         p.threshold = 0;
-    } else if (params.denoiseThreshold < 0.0f) {
+        tl_xtransDenoise.threshold =
+            computeXtransDenoiseThreshold(iso, params.xtransDenoiseThreshold);
+    } else {
+        tl_xtransDenoise.threshold = 0.0f;
+    }
+    if (!isXtransFile && params.denoiseThreshold < 0.0f) {
         if (iso <= 100.0f) {
             p.threshold = 0;
         } else if (iso <= 400.0f) {
@@ -234,7 +303,7 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
             float t = (log2f(iso) - logLow) / (logHigh - logLow);
             p.threshold = 100.0f + std::min(std::max(t, 0.0f), 1.0f) * 900.0f;
         }
-    } else {
+    } else if (!isXtransFile) {
         p.threshold = params.denoiseThreshold;
     }
 

@@ -374,6 +374,8 @@ set(RA_LIBRARY_SOURCES
     src/demosaic_dispatch.cpp
     src/demosaic_rcd.cpp
     src/demosaic_markesteijn.cpp
+    src/dwt_denoise.cpp
+    src/denoise_xtrans.cpp
     src/tiff_writer.cpp
     src/jpeg_writer.cpp
     src/image_resize.cpp

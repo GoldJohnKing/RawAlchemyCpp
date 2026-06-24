@@ -72,6 +72,12 @@ struct DecodeParams {
     /// Wavelet denoise threshold: <0 = auto (ISO-adaptive), 0 = off, >0 = manual
     float denoiseThreshold = -1.0f;
 
+    /// X-Trans wavelet denoise threshold (darktable domain): <0 = auto
+    /// (ISO-adaptive, mirroring the Bayer curve above), 0 = off, >0 = manual
+    /// value in ~[0.01, 0.1]. Only affects Fujifilm X-Trans (.RAF) files;
+    /// Bayer files use LibRaw's wavelet via `denoiseThreshold` and ignore this.
+    float xtransDenoiseThreshold = -1.0f;
+
     /// Demosaic algorithm selection (default AUTO: Bayer→RCD, X-Trans→Markesteijn).
     /// Set to LIBRAW_FALLBACK to use the original LibRaw path (uses demosaicQuality).
     DemosaicAlgorithm demosaicAlgorithm = DemosaicAlgorithm::AUTO;

@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 
 #ifdef RA_USE_OPENMP
 #include <omp.h>
@@ -97,10 +98,13 @@ void denoiseHoriz1ch(const float* __restrict coarse, float* __restrict io,
         float* __restrict accumRow = accum + rowindex;
 
         // Left edge: reflect the left neighbor. coarse[col-hscale] -> coarse[hscale-col].
+        // clang-cl's OpenMP requires a canonical relational loop condition, so
+        // fold the compound guard into a single min() bound.
+        const int leftEnd = std::min(hscale, width);
 #ifdef RA_USE_OPENMP
         #pragma omp simd
 #endif
-        for (int col = 0; col < hscale && col < width; ++col) {
+        for (int col = 0; col < leftEnd; ++col) {
             const float left = cRow[hscale - col];
             const float right = (col + hscale < width) ? cRow[col + hscale]
                                                        : cRow[2 * width - 2 - (col + hscale)];
