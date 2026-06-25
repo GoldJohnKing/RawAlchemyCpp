@@ -168,15 +168,25 @@ static void customXtransDemosaic(void* ctx) {
 /// Pre-WB X-Trans denoise callback (LibRaw pre_scalecolors_cb). Fires after
 /// black-subtract / adjust_maximum / green_matching but BEFORE scale_colors
 /// (white balance). imgdata.image[] here is black-subtracted raw CFA at native
-/// sensor bit-depth (14-bit Fuji ~16383 max), not the 16-bit range extractCfa's
-/// /65535 assumes, so the CFA is rescaled into darktable's [0,1 = raw white]
-/// domain around the denoise (where NOISE_ALL/threshold are calibrated). No-op
-/// for Bayer and for X-Trans when the threshold is <= 0.
+/// sensor bit-depth (14-bit Fuji ~16383 max), so extractCfa is called with
+/// img.color.maximum (not its 65535 default) to land the CFA directly in
+/// darktable's [0,1 = raw white] domain where NOISE_ALL/threshold are calibrated;
+/// writeBackCfa uses the matching maximum to round-trip back to native scale.
+/// No-op for Bayer and for X-Trans when the threshold is <= 0.
 static void denoiseXtransPreWB(void* ctx) {
     LibRaw* raw = static_cast<LibRaw*>(ctx);
     auto& img = raw->imgdata;
     if (!isXtrans(img.idata.filters)) return;
     if (tl_xtransDenoise.threshold <= 0.0f) return;
+
+    // half_size (preview) decodes allocate image[] with stride iwidth≈width/2
+    // (LibRaw raw2image: iwidth = (width+shrink)>>shrink). Indexing it with
+    // sizes.width would read out of bounds and crash. Previews don't need
+    // pre-WB denoise (and the half-size CFA is subsampled, so the 6x6 X-Trans
+    // pattern wouldn't align anyway), so skip shrink/half_size decodes entirely.
+    if (img.sizes.iwidth != img.sizes.width ||
+        img.sizes.iheight != img.sizes.height)
+        return;
 
     int w = static_cast<int>(img.sizes.width);
     int h = static_cast<int>(img.sizes.height);
