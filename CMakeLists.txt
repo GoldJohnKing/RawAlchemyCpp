@@ -446,6 +446,7 @@ set(RA_LIBRARY_SOURCES
     src/exif_injector.cpp
     src/win_unicode.cpp
     src/nn_nan_guard.cpp
+    src/nn_preprocess.cpp
 )
 
 # Add C API sources when building the C API
