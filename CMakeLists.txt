@@ -256,6 +256,81 @@ set(RA_LIBJPEG_SOURCE "submodule (libjpeg-turbo)")
 # via a drop-in header + implementation that maps to std::string, std::filesystem,
 # std::mutex, std::vector, and pugixml (for XML parsing).
 option(ENABLE_LENS_CORRECTION "Enable lens correction via Lensfun library" ON)
+
+# ---- Neural Network Demosaic (x-veon via ONNX Runtime) ----
+option(RA_ENABLE_NN_DEMOSAIC "Enable x-veon NN demosaic via ONNX Runtime" ON)
+set(RA_ORT_ROOT "" CACHE PATH "Path to pre-extracted ONNX Runtime SDK root (contains lib/ and include/). If empty, fetched automatically.")
+set(RA_DIRECTML_DLL "" CACHE FILEPATH "Path to DirectML.dll (Windows only). If empty, fetched automatically.")
+set(RA_QNN_RUNTIME_DIR "" CACHE PATH "Path to dir containing libQnnHtp.so + Skels (Android only). If empty, fetched from Maven.")
+
+# Version pins referenced by the import logic below — keep in sync with
+# scripts/fetch-nn-deps.sh (parent repo). DirectML version lives only in the
+# fetch script (not consumed by CMake).
+set(ORT_VERSION "1.24.1")
+set(QNN_RUNTIME_VERSION "2.34.0")
+
+if(RA_ENABLE_NN_DEMOSAIC)
+    # Always define the cache dir so DIRECTML_DLL_PATH (Windows) and
+    # QNN_RUNTIME_DIR (Android) resolve correctly even when the user supplies
+    # RA_ORT_ROOT, bypassing the auto-fetch block below. CMAKE_SOURCE_DIR is the
+    # rawalchemy root (top-level project when configured standalone).
+    set(RA_NN_CACHE "${CMAKE_SOURCE_DIR}/third_party/nn-cache")
+
+    # Auto-fetch if root not provided
+    if(NOT RA_ORT_ROOT)
+        if(WIN32)
+            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-win-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
+        elseif(ANDROID)
+            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-android-${ORT_VERSION}" CACHE PATH "" FORCE)
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-linux-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
+        endif()
+    endif()
+
+    if(WIN32)
+        # ORT Windows: headers + import lib + DLL
+        set(ORT_INCLUDE_DIR "${RA_ORT_ROOT}/include")
+        set(ORT_LIB_DIR "${RA_ORT_ROOT}/lib")
+        add_library(onnxruntime::dynamic SHARED IMPORTED)
+        set_target_properties(onnxruntime::dynamic PROPERTIES
+            IMPORTED_LOCATION "${RA_ORT_ROOT}/lib/onnxruntime.dll"
+            IMPORTED_IMPLIB "${ORT_LIB_DIR}/onnxruntime.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "${ORT_INCLUDE_DIR}"
+        )
+        # DirectML.dll (app-local, loaded manually via LoadLibrary)
+        set(DIRECTML_DLL_PATH "${RA_NN_CACHE}/DirectML.dll" CACHE FILEPATH "" FORCE)
+        message(STATUS "NN Demosaic: ORT=${RA_ORT_ROOT}, DirectML=${DIRECTML_DLL_PATH}")
+
+    elseif(ANDROID)
+        # ORT Android: headers + .so inside the extracted AAR
+        set(ORT_INCLUDE_DIR "${RA_ORT_ROOT}/headers")
+        set(ORT_LIB_DIR "${RA_ORT_ROOT}/jni/arm64-v8a")
+        add_library(onnxruntime::dynamic SHARED IMPORTED)
+        set_target_properties(onnxruntime::dynamic PROPERTIES
+            IMPORTED_LOCATION "${ORT_LIB_DIR}/libonnxruntime.so"
+            INTERFACE_INCLUDE_DIRECTORIES "${ORT_INCLUDE_DIR}"
+        )
+        # QNN runtime .so files (libQnnHtp.so, Skels, etc.) for packaging
+        set(QNN_RUNTIME_DIR "${RA_NN_CACHE}/qnn-runtime-${QNN_RUNTIME_VERSION}/jni/arm64-v8a" CACHE PATH "" FORCE)
+        message(STATUS "NN Demosaic: ORT=${RA_ORT_ROOT}, QNN=${QNN_RUNTIME_DIR}")
+
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # ORT Linux (dev-loop): CPU EP only. No GPU EP wired on Linux — this
+        # branch exists solely so nn_session.cpp compiles/links on the WSL2 host
+        # against real ORT headers. The .tgz from fetch-nn-deps.sh extracts to a
+        # dir whose layout is: include/, lib/libonnxruntime.so[.1.x].
+        set(ORT_INCLUDE_DIR "${RA_ORT_ROOT}/include")
+        set(ORT_LIB_DIR "${RA_ORT_ROOT}/lib")
+        add_library(onnxruntime::dynamic SHARED IMPORTED)
+        set_target_properties(onnxruntime::dynamic PROPERTIES
+            IMPORTED_LOCATION "${ORT_LIB_DIR}/libonnxruntime.so"
+            IMPORTED_IMPLIB "${ORT_LIB_DIR}/libonnxruntime.so"
+            INTERFACE_INCLUDE_DIRECTORIES "${ORT_INCLUDE_DIR}"
+        )
+        message(STATUS "NN Demosaic: ORT=${RA_ORT_ROOT} (Linux dev-loop, CPU EP only)")
+    endif()
+endif()
+
 set(RA_LENSFUN_ENABLED OFF)
 
 if(ENABLE_LENS_CORRECTION)
@@ -387,6 +462,11 @@ set(RA_LIBRARY_SOURCES
     src/lens_correction.cpp
     src/exif_injector.cpp
     src/win_unicode.cpp
+    src/nn_nan_guard.cpp
+    src/nn_preprocess.cpp
+    src/nn_postprocess.cpp
+    src/nn_session.cpp
+    src/demosaic_nn_xveon.cpp
 )
 
 # Add C API sources when building the C API
@@ -471,6 +551,12 @@ if(RA_LENSFUN_ENABLED)
         ${CMAKE_BINARY_DIR}/lensfun_generated  # lensfun.h for public API
     )
     target_link_libraries(raw_alchemy_core PUBLIC lensfun)
+endif()
+
+# NN demosaic (ORT) linkage
+if(RA_ENABLE_NN_DEMOSAIC)
+    target_compile_definitions(raw_alchemy_core PUBLIC RA_ENABLE_NN_DEMOSAIC)
+    target_link_libraries(raw_alchemy_core PUBLIC onnxruntime::dynamic)
 endif()
 
 # Link math library on Linux
@@ -584,6 +670,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     # (changes wavelet denoise accumulation order).
     target_compile_options(raw_r PUBLIC ${RA_LIBRAW_FP_OPTS})
     # lensfun & libtiff: no fast-math flags (keep strict FP)
+endif()
+
+# nn_nan_guard.cpp MUST NOT use -ffast-math (would delete isnan/isinf guards).
+# Applied per-file because the whole raw_alchemy_core target uses -ffast-math
+# above; this override restores strict FP for just the guard TU.
+# clang-cl (Windows) requires the /clang: forwarding prefix, same as RA_CORE_FASTMATH
+# above (see comment at line 625-628): bare -fno-fast-math is silently ignored.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
+        COMPILE_OPTIONS "/clang:-fno-fast-math"
+    )
+else()
+    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math"
+    )
 endif()
 
 # --- 3. Architecture tuning & warnings ---
