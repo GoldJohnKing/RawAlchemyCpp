@@ -256,6 +256,59 @@ set(RA_LIBJPEG_SOURCE "submodule (libjpeg-turbo)")
 # via a drop-in header + implementation that maps to std::string, std::filesystem,
 # std::mutex, std::vector, and pugixml (for XML parsing).
 option(ENABLE_LENS_CORRECTION "Enable lens correction via Lensfun library" ON)
+
+# ---- Neural Network Demosaic (x-veon via ONNX Runtime) ----
+option(RA_ENABLE_NN_DEMOSAIC "Enable x-veon NN demosaic via ONNX Runtime" ON)
+set(RA_ORT_ROOT "" CACHE PATH "Path to pre-extracted ONNX Runtime SDK root (contains lib/ and include/). If empty, fetched automatically.")
+set(RA_DIRECTML_DLL "" CACHE FILEPATH "Path to DirectML.dll (Windows only). If empty, fetched automatically.")
+set(RA_QNN_RUNTIME_DIR "" CACHE PATH "Path to dir containing libQnnHtp.so + Skels (Android only). If empty, fetched from Maven.")
+
+# Version pins referenced by the import logic below — keep in sync with
+# scripts/fetch-nn-deps.sh (parent repo). DirectML version lives only in the
+# fetch script (not consumed by CMake).
+set(ORT_VERSION "1.24.1")
+set(QNN_RUNTIME_VERSION "2.34.0")
+
+if(RA_ENABLE_NN_DEMOSAIC)
+    # Auto-fetch if root not provided
+    if(NOT RA_ORT_ROOT)
+        set(RA_NN_CACHE "${CMAKE_SOURCE_DIR}/third_party/nn-cache")
+        if(WIN32)
+            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-win-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
+        elseif(ANDROID)
+            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-android-${ORT_VERSION}" CACHE PATH "" FORCE)
+        endif()
+    endif()
+
+    if(WIN32)
+        # ORT Windows: headers + import lib + DLL
+        set(ORT_INCLUDE_DIR "${RA_ORT_ROOT}/include")
+        set(ORT_LIB_DIR "${RA_ORT_ROOT}/lib")
+        add_library(onnxruntime::dynamic SHARED IMPORTED)
+        set_target_properties(onnxruntime::dynamic PROPERTIES
+            IMPORTED_LOCATION "${RA_ORT_ROOT}/lib/onnxruntime.dll"
+            IMPORTED_IMPLIB "${ORT_LIB_DIR}/onnxruntime.lib"
+            INTERFACE_INCLUDE_DIRECTORIES "${ORT_INCLUDE_DIR}"
+        )
+        # DirectML.dll (app-local, loaded manually via LoadLibrary)
+        set(DIRECTML_DLL_PATH "${RA_NN_CACHE}/DirectML.dll" CACHE FILEPATH "" FORCE)
+        message(STATUS "NN Demosaic: ORT=${RA_ORT_ROOT}, DirectML=${DIRECTML_DLL_PATH}")
+
+    elseif(ANDROID)
+        # ORT Android: headers + .so inside the extracted AAR
+        set(ORT_INCLUDE_DIR "${RA_ORT_ROOT}/headers")
+        set(ORT_LIB_DIR "${RA_ORT_ROOT}/jni/arm64-v8a")
+        add_library(onnxruntime::dynamic SHARED IMPORTED)
+        set_target_properties(onnxruntime::dynamic PROPERTIES
+            IMPORTED_LOCATION "${ORT_LIB_DIR}/libonnxruntime.so"
+            INTERFACE_INCLUDE_DIRECTORIES "${ORT_INCLUDE_DIR}"
+        )
+        # QNN runtime .so files (libQnnHtp.so, Skels, etc.) for packaging
+        set(QNN_RUNTIME_DIR "${RA_NN_CACHE}/qnn-runtime-${QNN_RUNTIME_VERSION}/jni/arm64-v8a" CACHE PATH "" FORCE)
+        message(STATUS "NN Demosaic: ORT=${RA_ORT_ROOT}, QNN=${QNN_RUNTIME_DIR}")
+    endif()
+endif()
+
 set(RA_LENSFUN_ENABLED OFF)
 
 if(ENABLE_LENS_CORRECTION)
