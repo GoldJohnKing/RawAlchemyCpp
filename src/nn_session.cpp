@@ -9,7 +9,13 @@
 //
 // API provenance (ORT 1.24.1, verified against vendored headers +
 // onnxruntime.ai/docs/execution-providers/):
-//   - DirectML: OrtApi::SessionOptionsAppendExecutionProvider_DML(options, device_id)
+//   - DirectML: OrtApi::GetExecutionProviderApi("DML", ORT_API_VERSION, &ptr)
+//               → cast to const OrtDmlApi* → SessionOptionsAppendExecutionProvider_DML.
+//               (SessionOptionsAppendExecutionProvider_DML is NOT an OrtApi struct
+//               member in 1.24 — it migrated to the provider-factory pattern. The
+//               OrtDmlApi struct ships only in the DirectML ORT package's
+//               dml_provider_factory.h, which the generic GitHub release zip we
+//               vendor omits, so the ABI-matching layout is defined locally below.)
 //   - QNN:      Ort::SessionOptions::AppendExecutionProvider("QNN", unordered_map)
 //               wrapping OrtApi::SessionOptionsAppendExecutionProvider(...)
 //   - CPU-fallback disable: session config key kOrtSessionOptionsDisableCPUEPFallback
@@ -43,6 +49,25 @@ std::string parentDir(const std::string& path) {
     const size_t slash = path.find_last_of("/\\");
     return (slash == std::string::npos) ? std::string{} : path.substr(0, slash);
 }
+
+// Forward-declared so the OrtDmlApi function-pointer signature below can name it
+// without pulling in <d3d12.h> (we always pass nullptr — ORT creates the device).
+struct ID3D12Device;
+
+// Minimal ABI-matching definition of OrtDmlApi for ORT 1.24. The full struct
+// ships in dml_provider_factory.h, which is only included in the DirectML ORT
+// package (onnxruntime-win-x64-directml-*), NOT the generic GitHub release zip
+// that this project vendors. GetExecutionProviderApi("DML",...) returns a
+// pointer whose first (and, in 1.24, only) slot is this function pointer, so a
+// single-member struct matches the ABI. Layout verified against the
+// onnxruntime_c_api.h docstring for GetExecutionProviderApi (line ~3733):
+//   "the provider_api pointer can be cast to the OrtDmlApi* when the
+//    provider_name is 'DML'."
+struct OrtDmlApi {
+    OrtStatus* (*SessionOptionsAppendExecutionProvider_DML)(
+        OrtSessionOptions* options, ID3D12Device* device,
+        int device_id, bool bypass_runtime_pool_resource_lifetime_rules);
+};
 #endif
 
 // Builds SessionOptions with intra/inter thread pools pinned to 1 and the
@@ -78,9 +103,27 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
     // no DML adapter is found (init throws before these matter).
     sopts.SetExecutionMode(ORT_SEQUENTIAL);
     sopts.DisableMemPattern();
-    // device_index 0 = primary DX12 adapter (ORT enumerates via IDXGIFactory).
-    Ort::ThrowOnError(Ort::GetApi().SessionOptionsAppendExecutionProvider_DML(
-        static_cast<OrtSessionOptions*>(sopts), /*device_index=*/0));
+
+    // ORT 1.24 exposes DML via GetExecutionProviderApi("DML") → OrtDmlApi*, NOT
+    // as an OrtApi struct member (Task 9 / C1 fix: the old
+    // OrtApi::SessionOptionsAppendExecutionProvider_DML does not exist in 1.24).
+    // GetExecutionProviderApi is exported by every onnxruntime.dll (generic or
+    // DirectML build), so this links against the generic lib we vendor. With a
+    // generic runtime DLL the call returns an error → Ort::ThrowOnError throws →
+    // init() catches it → graceful fallback to traditional demosaic (design
+    // sec 6.1). A DirectML-capable DLL is a deployment/packaging concern.
+    const void* dmlApiVoid = nullptr;
+    Ort::ThrowOnError(Ort::GetApi().GetExecutionProviderApi(
+        "DML", ORT_API_VERSION, &dmlApiVoid));
+    const OrtDmlApi* dmlApi = static_cast<const OrtDmlApi*>(dmlApiVoid);
+    // device=nullptr → ORT enumerates + creates the D3D12 device itself
+    // (device_id 0 = primary DX12 adapter, via IDXGIFactory). bypass_...=false
+    // uses ORT's standard DML resource-lifetime management. This is the
+    // "simplest v1 form" from design sec 3.3 (ORT owns DMLCreateDevice).
+    Ort::ThrowOnError(dmlApi->SessionOptionsAppendExecutionProvider_DML(
+        static_cast<OrtSessionOptions*>(sopts),
+        /*device=*/nullptr, /*device_id=*/0,
+        /*bypass_runtime_pool_resource_lifetime_rules=*/false));
 
 #elif defined(__ANDROID__)
     // --- QNN HTP FP16 EP (design sec 3.2) ---
