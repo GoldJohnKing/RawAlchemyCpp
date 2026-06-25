@@ -163,18 +163,13 @@ void denoise_xtrans(const float* in, float* out, int w, int h,
 
 float computeXtransDenoiseThreshold(float iso, float manualThreshold) {
     if (manualThreshold >= 0.0f) return manualThreshold;  // 0 = off, >0 = literal
-    // Auto: mirror the Bayer wavelet curve (raw_decoder.cpp:226-239) rescaled to
-    // darktable's [0, 0.05] domain. Same ISO breakpoints and log2-linear shape.
-    if (iso <= 100.0f) return 0.0f;
-    if (iso <= 400.0f) return 0.01f;
-    constexpr float logLow = 8.644f;    // log2(400)
-    constexpr float logHigh = 13.644f;  // log2(12800)
-    float t = (std::log2(iso) - logLow) / (logHigh - logLow);
-    t = std::min(std::max(t, 0.0f), 1.0f);
-    // 0.01f + 1.0f * 0.04f lands one ULP below 0.05f in IEEE754 (0.01f+0.04f !=
-    // 0.05f), but the spec guarantees exactly 0.05 above the cap. Snap to it.
-    if (t >= 1.0f) return 0.05f;
-    return 0.01f + t * 0.04f;  // (0.01, 0.05)
+    // Auto: flat 0.01 across all ISO. denoise_xtrans applies a sqrt variance-
+    // stabilizing transform (Anscombe), which makes the shot-noise threshold
+    // ISO-independent — so, like darktable's rawdenoise (which has no ISO logic
+    // and defaults to 0.01), we use a single fixed value. An ISO ramp would
+    // re-introduce the coupling the VST is there to eliminate.
+    (void)iso;
+    return 0.01f;
 }
 
 } // namespace rawalchemy

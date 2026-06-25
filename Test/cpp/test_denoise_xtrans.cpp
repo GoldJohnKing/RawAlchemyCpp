@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Tests for the X-Trans CFA wavelet denoise driver and ISO threshold curve.
+// Tests for the X-Trans CFA wavelet denoise driver and threshold selection.
 #include "../../include/cfa_lookup.h"
 #include "../../include/denoise_xtrans.h"
 
@@ -21,15 +21,16 @@ int main() {
         { 1, 0, 1, 1, 2, 1 }
     };
 
-    // ---- computeXtransDenoiseThreshold: ISO curve mirrors Bayer (raw_decoder.cpp:226-239) ----
-    assert(computeXtransDenoiseThreshold(50.f,    -1.f) == 0.00f);   // ISO<=100: off
-    assert(computeXtransDenoiseThreshold(100.f,   -1.f) == 0.00f);   // boundary inclusive
-    assert(computeXtransDenoiseThreshold(101.f,   -1.f) == 0.01f);   // 101..400: light
-    assert(computeXtransDenoiseThreshold(400.f,   -1.f) == 0.01f);   // boundary inclusive
-    assert(computeXtransDenoiseThreshold(800.f,   -1.f) >  0.01f);   // ramp begins >400
-    assert(std::fabs(computeXtransDenoiseThreshold(12800.f, -1.f) - 0.05f) < 1e-5f); // cap
-    assert(computeXtransDenoiseThreshold(51200.f, -1.f) == 0.05f);   // clamped at cap
-    // manual override: 0 = off, >0 = literal
+    // Auto: flat 0.01 across all ISO (sqrt VST makes threshold ISO-independent,
+    // matching darktable's rawdenoise default).
+    assert(computeXtransDenoiseThreshold(50.f,    -1.f) == 0.01f);
+    assert(computeXtransDenoiseThreshold(100.f,   -1.f) == 0.01f);
+    assert(computeXtransDenoiseThreshold(400.f,   -1.f) == 0.01f);
+    assert(computeXtransDenoiseThreshold(1600.f,  -1.f) == 0.01f);
+    assert(computeXtransDenoiseThreshold(6400.f,  -1.f) == 0.01f);
+    assert(computeXtransDenoiseThreshold(12800.f, -1.f) == 0.01f);
+    assert(computeXtransDenoiseThreshold(51200.f, -1.f) == 0.01f);
+    // manual override: 0 = off, >0 = literal (unchanged)
     assert(computeXtransDenoiseThreshold(6400.f, 0.00f) == 0.00f);
     assert(computeXtransDenoiseThreshold(6400.f, 0.03f) == 0.03f);
 

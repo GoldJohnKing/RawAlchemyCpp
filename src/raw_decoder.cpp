@@ -296,7 +296,7 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     // Bayer-only; running it on X-Trans corrupts the green channel).
     p.green_matching = params.greenMatching ? 1 : 0;
 
-    // --- ISO-adaptive noise reduction ---
+    // --- Noise reduction (Bayer: ISO-adaptive; X-Trans: flat 0.01, ISO-independent) ---
     float iso = rawProcessor.imgdata.other.iso_speed;
 
     // X-Trans: LibRaw's wavelet_denoise() inside scale_colors() is designed for

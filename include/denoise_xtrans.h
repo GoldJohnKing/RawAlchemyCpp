@@ -25,20 +25,23 @@ namespace rawalchemy {
  * @param w,h       Image dimensions.
  * @param xtrans    6x6 color map from LibRaw `imgdata.idata.xtrans` (0=R,1=G,2=B).
  * @param threshold darktable-domain noise threshold in [0, ~0.1]; 0 is an
- *                  identity pass. Typical auto range is 0.01..0.05.
+ *                  identity pass. Auto mode uses a flat 0.01 (see below).
  */
 void denoise_xtrans(const float* in, float* out, int w, int h,
                     const char xtrans[6][6], float threshold);
 
 /**
- * @brief ISO-adaptive X-Trans denoise threshold, mirroring the Bayer wavelet
- *        ISO curve in raw_decoder.cpp:226-239 but rescaled to darktable's domain.
+ * @brief X-Trans denoise threshold: flat 0.01 in auto mode (ISO-independent).
  *
- * Mirrors Bayer breakpoints: ISO<=100 off, 101..400 light (0.01), >400 a
- * log2-linear ramp to 0.05 at ISO 12800, clamped above.
+ * denoise_xtrans applies a sqrt variance-stabilizing transform (Anscombe),
+ * which makes the shot-noise threshold ISO-independent — so, like darktable's
+ * rawdenoise (which has no ISO logic and defaults to 0.01), auto mode returns a
+ * single fixed 0.01 across all ISO. An ISO ramp would re-introduce the coupling
+ * the VST is there to eliminate.
  *
- * @param iso               EXIF ISO speed (e.g. from imgdata.other.iso_speed).
- * @param manualThreshold   <0 = auto (ISO-adaptive); 0 = off; >0 = literal value.
+ * @param iso               EXIF ISO speed (ignored in auto mode; kept for ABI
+ *                          stability and a potential future ISO-aware path).
+ * @param manualThreshold   <0 = auto (flat 0.01); 0 = off; >0 = literal value.
  * @return                  Threshold in darktable domain; 0 means "do not denoise".
  */
 float computeXtransDenoiseThreshold(float iso, float manualThreshold);
