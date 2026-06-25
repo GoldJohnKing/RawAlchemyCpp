@@ -648,13 +648,15 @@ endif()
 # nn_nan_guard.cpp MUST NOT use -ffast-math (would delete isnan/isinf guards).
 # Applied per-file because the whole raw_alchemy_core target uses -ffast-math
 # above; this override restores strict FP for just the guard TU.
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+# clang-cl (Windows) requires the /clang: forwarding prefix, same as RA_CORE_FASTMATH
+# above (see comment at line 625-628): bare -fno-fast-math is silently ignored.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
+        COMPILE_OPTIONS "/clang:-fno-fast-math"
+    )
+else()
     set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math"
-    )
-elseif(MSVC)
-    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
-        COMPILE_OPTIONS "/fp:strict"
     )
 endif()
 
