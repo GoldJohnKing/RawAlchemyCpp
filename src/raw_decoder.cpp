@@ -66,7 +66,8 @@ static void fixDimensions(LibRaw* raw) {
 /// Extract single-channel CFA mosaic from LibRaw's 4-channel image[] buffer.
 /// Uses fcol() semantics to determine which channel holds the CFA value.
 static AlignedVector<float> extractCfa(const unsigned short (*image)[4],
-                                        int w, int h, const LibRaw& raw) {
+                                        int w, int h, const LibRaw& raw,
+                                        float whiteLevel = 65535.0f) {
     const size_t n = static_cast<size_t>(w) * h;
     AlignedVector<float> cfa(n);
     const bool xt = (raw.imgdata.idata.filters == 9);
@@ -80,7 +81,7 @@ static AlignedVector<float> extractCfa(const unsigned short (*image)[4],
                 c = bayerColor(row, col, raw.imgdata.idata.filters);
             }
             cfa[static_cast<size_t>(row) * w + col] =
-                static_cast<float>(image[static_cast<size_t>(row) * w + col][c]) / 65535.0f;
+                static_cast<float>(image[static_cast<size_t>(row) * w + col][c]) / whiteLevel;
         }
     }
     return cfa;
@@ -107,11 +108,11 @@ static void writeBackRgb(unsigned short (*image)[4],
 /// image[] buffer, at each pixel's CFA channel only. Inverse of extractCfa();
 /// used by the pre-WB denoise callback.
 static void writeBackCfa(unsigned short (*image)[4], const float* cfa,
-                          int w, int h, const LibRaw& raw) {
+                          int w, int h, const LibRaw& raw, float whiteLevel) {
     const bool xt = (raw.imgdata.idata.filters == 9);
-    auto clamp = [](float v) -> unsigned short {
+    auto clamp = [whiteLevel](float v) -> unsigned short {
         return static_cast<unsigned short>(
-            std::max(0.0f, std::min(65535.0f, v * 65535.0f)));
+            std::max(0.0f, std::min(65535.0f, v * whiteLevel)));
     };
     for (int row = 0; row < h; ++row)
         for (int col = 0; col < w; ++col) {
@@ -182,26 +183,20 @@ static void denoiseXtransPreWB(void* ctx) {
     auto (*image)[4] = reinterpret_cast<unsigned short (*)[4]>(img.image);
     if (!image) return;
 
-    // extractCfa divides by 65535, but at pre_scalecolors_cb the data is still at
-    // native sensor bit-depth (scale_colors hasn't filled the 16-bit range yet).
-    // darktable's rawdenoise domain is [0,1] where 1.0 = camera raw white, so
-    // rescale by 65535/maximum before denoising, then back before writeBackCfa.
+    // extractCfa divides by whiteLevel; at pre_scalecolors_cb the data is at native
+    // sensor bit-depth, so pass img.color.maximum to land directly in darktable's
+    // [0,1 = raw white] domain where NOISE_ALL/threshold are calibrated. writeBackCfa
+    // uses the matching maximum to round-trip back to native scale.
     const float rawMax = static_cast<float>(img.color.maximum);
     if (!(rawMax > 0.0f)) return;  // corrupt/missing maximum → skip denoise safely
 
-    auto cfa = extractCfa(image, w, h, *raw);
-    const float toDarktable = 65535.0f / rawMax;    // ~4 for 14-bit
-    const float fromDarktable = rawMax / 65535.0f;  // ~0.25 for 14-bit
-    for (float& v : cfa) v *= toDarktable;
-
     // in/out must not alias across channels (see denoise_xtrans contract), so
     // denoise into a fresh buffer then write back to the CFA channel positions.
+    auto cfa = extractCfa(image, w, h, *raw, rawMax);
     AlignedVector<float> denoised(static_cast<size_t>(w) * h);
     denoise_xtrans(cfa.data(), denoised.data(), w, h,
                    img.idata.xtrans, tl_xtransDenoise.threshold);
-
-    for (float& v : denoised) v *= fromDarktable;
-    writeBackCfa(image, denoised.data(), w, h, *raw);
+    writeBackCfa(image, denoised.data(), w, h, *raw, rawMax);
 }
 
 /// Pre-interpolate callback: just fixes iheight/iwidth (wavelet denoise bug).
