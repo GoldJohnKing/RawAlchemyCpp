@@ -37,4 +37,50 @@ void normalizeCfaInPlace(float* cfa, size_t count, float blackLevel, float white
     }
 }
 
+// Canonical X-Trans 6x6 pattern (Fujifilm standard). 0=R, 1=G, 2=B.
+static const int XTRANS_CANONICAL[6][6] = {
+    {1, 2, 1, 1, 0, 1},
+    {0, 1, 0, 2, 1, 2},
+    {1, 2, 1, 1, 0, 1},
+    {1, 0, 1, 1, 2, 1},
+    {2, 1, 2, 0, 1, 0},
+    {1, 0, 1, 1, 2, 1}
+};
+
+void makeCanonicalMasks(float* outMaskR, float* outMaskG, float* outMaskB,
+                        const CfaPhase& phase) {
+    for (int y = 0; y < NN_PATCH_SIZE; ++y) {
+        for (int x = 0; x < NN_PATCH_SIZE; ++x) {
+            int idx = y * NN_PATCH_SIZE + x;
+            int ch;
+            if (phase.isXtrans) {
+                ch = XTRANS_CANONICAL[y % 6][x % 6];
+            } else {
+                // Canonical RGGB: R=0,G=1,B=2 mapping to 2x2
+                static const int RGGB_2x2[2][2] = {{0, 1}, {1, 2}};
+                ch = RGGB_2x2[y % 2][x % 2];
+            }
+            outMaskR[idx] = (ch == 0) ? 1.0f : 0.0f;
+            outMaskG[idx] = (ch == 1) ? 1.0f : 0.0f;
+            outMaskB[idx] = (ch == 2) ? 1.0f : 0.0f;
+        }
+    }
+}
+
+void packTileInput(float* outTile4ch,
+                   const float* cfaTile,
+                   const float* maskR,
+                   const float* maskG,
+                   const float* maskB) {
+    const int N = NN_PATCH_SIZE * NN_PATCH_SIZE;
+    // Channel 0: CFA
+    for (int i = 0; i < N; ++i) outTile4ch[i] = cfaTile[i];
+    // Channel 1: R mask
+    for (int i = 0; i < N; ++i) outTile4ch[N + i] = maskR[i];
+    // Channel 2: G mask
+    for (int i = 0; i < N; ++i) outTile4ch[2 * N + i] = maskG[i];
+    // Channel 3: B mask
+    for (int i = 0; i < N; ++i) outTile4ch[3 * N + i] = maskB[i];
+}
+
 } // namespace rawalchemy
