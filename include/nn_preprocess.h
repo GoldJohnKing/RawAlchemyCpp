@@ -33,9 +33,18 @@ static constexpr int NN_PATCH_SIZE = 288;
 static constexpr int NN_OVERLAP = 48;
 static constexpr int NN_STRIDE = NN_PATCH_SIZE - NN_OVERLAP;  // 240
 
+/** Returns the canonical CFA color (0=R, 1=G, 2=B) at canonical-aligned
+ *  position (y,x). Assumes the image origin has been mirror-padded to the
+ *  canonical pattern using CfaPhase, so (0,0) is the canonical R origin.
+ *  This is the single source of truth for the canonical-pattern lookup,
+ *  shared by per-site white balance and canonical mask construction. Negative
+ *  or large coordinates are folded by reflecting/modulo against the period. */
+int canonicalCfaColor(int y, int x, const CfaPhase& phase);
+
 /** Fill three NN_PATCH_SIZE × NN_PATCH_SIZE planes with one-hot masks of the
  *  CANONICAL CFA pattern (RGGB for Bayer, the standard 6×6 for X-Trans).
- *  The image is assumed already phase-aligned via mirror-pad using CfaPhase. */
+ *  The image is assumed already phase-aligned via mirror-pad using CfaPhase.
+ *  Implemented in terms of canonicalCfaColor(). */
 void makeCanonicalMasks(float* outMaskR, float* outMaskG, float* outMaskB,
                         const CfaPhase& phase);
 

@@ -466,6 +466,7 @@ set(RA_LIBRARY_SOURCES
     src/nn_preprocess.cpp
     src/nn_postprocess.cpp
     src/nn_session.cpp
+    src/demosaic_nn_xveon.cpp
 )
 
 # Add C API sources when building the C API
