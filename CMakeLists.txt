@@ -270,9 +270,14 @@ set(ORT_VERSION "1.24.1")
 set(QNN_RUNTIME_VERSION "2.34.0")
 
 if(RA_ENABLE_NN_DEMOSAIC)
+    # Always define the cache dir so DIRECTML_DLL_PATH (Windows) and
+    # QNN_RUNTIME_DIR (Android) resolve correctly even when the user supplies
+    # RA_ORT_ROOT, bypassing the auto-fetch block below. CMAKE_SOURCE_DIR is the
+    # rawalchemy root (top-level project when configured standalone).
+    set(RA_NN_CACHE "${CMAKE_SOURCE_DIR}/third_party/nn-cache")
+
     # Auto-fetch if root not provided
     if(NOT RA_ORT_ROOT)
-        set(RA_NN_CACHE "${CMAKE_SOURCE_DIR}/third_party/nn-cache")
         if(WIN32)
             set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-win-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
         elseif(ANDROID)
