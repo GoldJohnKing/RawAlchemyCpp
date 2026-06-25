@@ -282,6 +282,8 @@ if(RA_ENABLE_NN_DEMOSAIC)
             set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-win-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
         elseif(ANDROID)
             set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-android-${ORT_VERSION}" CACHE PATH "" FORCE)
+        elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-linux-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
         endif()
     endif()
 
@@ -311,6 +313,21 @@ if(RA_ENABLE_NN_DEMOSAIC)
         # QNN runtime .so files (libQnnHtp.so, Skels, etc.) for packaging
         set(QNN_RUNTIME_DIR "${RA_NN_CACHE}/qnn-runtime-${QNN_RUNTIME_VERSION}/jni/arm64-v8a" CACHE PATH "" FORCE)
         message(STATUS "NN Demosaic: ORT=${RA_ORT_ROOT}, QNN=${QNN_RUNTIME_DIR}")
+
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # ORT Linux (dev-loop): CPU EP only. No GPU EP wired on Linux — this
+        # branch exists solely so nn_session.cpp compiles/links on the WSL2 host
+        # against real ORT headers. The .tgz from fetch-nn-deps.sh extracts to a
+        # dir whose layout is: include/, lib/libonnxruntime.so[.1.x].
+        set(ORT_INCLUDE_DIR "${RA_ORT_ROOT}/include")
+        set(ORT_LIB_DIR "${RA_ORT_ROOT}/lib")
+        add_library(onnxruntime::dynamic SHARED IMPORTED)
+        set_target_properties(onnxruntime::dynamic PROPERTIES
+            IMPORTED_LOCATION "${ORT_LIB_DIR}/libonnxruntime.so"
+            IMPORTED_IMPLIB "${ORT_LIB_DIR}/libonnxruntime.so"
+            INTERFACE_INCLUDE_DIRECTORIES "${ORT_INCLUDE_DIR}"
+        )
+        message(STATUS "NN Demosaic: ORT=${RA_ORT_ROOT} (Linux dev-loop, CPU EP only)")
     endif()
 endif()
 
@@ -448,6 +465,7 @@ set(RA_LIBRARY_SOURCES
     src/nn_nan_guard.cpp
     src/nn_preprocess.cpp
     src/nn_postprocess.cpp
+    src/nn_session.cpp
 )
 
 # Add C API sources when building the C API
@@ -532,6 +550,12 @@ if(RA_LENSFUN_ENABLED)
         ${CMAKE_BINARY_DIR}/lensfun_generated  # lensfun.h for public API
     )
     target_link_libraries(raw_alchemy_core PUBLIC lensfun)
+endif()
+
+# NN demosaic (ORT) linkage
+if(RA_ENABLE_NN_DEMOSAIC)
+    target_compile_definitions(raw_alchemy_core PUBLIC RA_ENABLE_NN_DEMOSAIC)
+    target_link_libraries(raw_alchemy_core PUBLIC onnxruntime::dynamic)
 endif()
 
 # Link math library on Linux
