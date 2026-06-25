@@ -166,10 +166,11 @@ static void customXtransDemosaic(void* ctx) {
 
 /// Pre-WB X-Trans denoise callback (LibRaw pre_scalecolors_cb). Fires after
 /// black-subtract / adjust_maximum / green_matching but BEFORE scale_colors
-/// (white balance). imgdata.image[] here is black-subtracted raw CFA — the same
-/// domain darktable's rawdenoise operates in, so the sqrt variance stabilizer
-/// and noise-floor constants are correctly calibrated. No-op for Bayer and for
-/// X-Trans when the threshold is <= 0.
+/// (white balance). imgdata.image[] here is black-subtracted raw CFA at native
+/// sensor bit-depth (14-bit Fuji ~16383 max), not the 16-bit range extractCfa's
+/// /65535 assumes, so the CFA is rescaled into darktable's [0,1 = raw white]
+/// domain around the denoise (where NOISE_ALL/threshold are calibrated). No-op
+/// for Bayer and for X-Trans when the threshold is <= 0.
 static void denoiseXtransPreWB(void* ctx) {
     LibRaw* raw = static_cast<LibRaw*>(ctx);
     auto& img = raw->imgdata;
@@ -181,12 +182,25 @@ static void denoiseXtransPreWB(void* ctx) {
     auto (*image)[4] = reinterpret_cast<unsigned short (*)[4]>(img.image);
     if (!image) return;
 
+    // extractCfa divides by 65535, but at pre_scalecolors_cb the data is still at
+    // native sensor bit-depth (scale_colors hasn't filled the 16-bit range yet).
+    // darktable's rawdenoise domain is [0,1] where 1.0 = camera raw white, so
+    // rescale by 65535/maximum before denoising, then back before writeBackCfa.
+    const float rawMax = static_cast<float>(img.color.maximum);
+    if (!(rawMax > 0.0f)) return;  // corrupt/missing maximum → skip denoise safely
+
+    auto cfa = extractCfa(image, w, h, *raw);
+    const float toDarktable = 65535.0f / rawMax;    // ~4 for 14-bit
+    const float fromDarktable = rawMax / 65535.0f;  // ~0.25 for 14-bit
+    for (float& v : cfa) v *= toDarktable;
+
     // in/out must not alias across channels (see denoise_xtrans contract), so
     // denoise into a fresh buffer then write back to the CFA channel positions.
-    auto cfa = extractCfa(image, w, h, *raw);
     AlignedVector<float> denoised(static_cast<size_t>(w) * h);
     denoise_xtrans(cfa.data(), denoised.data(), w, h,
                    img.idata.xtrans, tl_xtransDenoise.threshold);
+
+    for (float& v : denoised) v *= fromDarktable;
     writeBackCfa(image, denoised.data(), w, h, *raw);
 }
 
