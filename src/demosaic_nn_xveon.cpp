@@ -66,10 +66,10 @@ int tileCount(int extent) {
 
 }  // namespace
 
-NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, float* outRgbInterleaved) {
+NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     // --- Step 1a: param validation (cheap, fail-fast on programmer error) ---
-    if (in.width <= 0 || in.height <= 0 || in.cfa == nullptr || outRgbInterleaved == nullptr) {
-        return NnDemosaicStatus::InvalidInput;
+    if (in.width <= 0 || in.height <= 0 || in.cfaMosaic == nullptr) {
+        return NnDemosaicStatus::InvalidParam;
     }
 
     // --- Step 1b: session readiness (design §6.1: NN unavailable -> caller falls back) ---
@@ -91,7 +91,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, float* outRgbInterleaved)
 
     // --- Step 2: working copy + normalize (do not mutate caller's CFA) ---
     std::vector<float> workingCfa(static_cast<size_t>(W) * static_cast<size_t>(H));
-    std::copy(in.cfa, in.cfa + workingCfa.size(), workingCfa.begin());
+    std::copy(in.cfaMosaic, in.cfaMosaic + workingCfa.size(), workingCfa.begin());
     normalizeCfaInPlace(workingCfa.data(), workingCfa.size(), in.blackLevel, in.whiteLevel);
 
     // --- Step 3: per-site white balance (design §2.3 step 5).
@@ -101,7 +101,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, float* outRgbInterleaved)
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
             const int ch = canonicalCfaColor(y + phase.dy, x + phase.dx, phase);
-            workingCfa[static_cast<size_t>(y) * W + x] *= in.wb[ch];
+            workingCfa[static_cast<size_t>(y) * W + x] *= in.wbRgb[ch];
         }
     }
 
@@ -247,7 +247,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, float* outRgbInterleaved)
     }
 
     if (nanDetected.load(std::memory_order_acquire)) {
-        return NnDemosaicStatus::NanDetected;
+        return NnDemosaicStatus::NaNOutput;
     }
     if (inferenceFailed.load(std::memory_order_acquire)) {
         return NnDemosaicStatus::InferenceFailed;
@@ -256,6 +256,10 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, float* outRgbInterleaved)
     // --- Step 7: normalize accumulation, crop padding, apply color matrix ---
     float camToSrgb[9];
     computeCamRgbToSrgb(camToSrgb, in.xyzToCam);
+
+    const size_t outPix = static_cast<size_t>(W) * static_cast<size_t>(H);
+    out.rgbInterleaved.assign(outPix * 3, 0.0f);
+    float* outRgbInterleaved = out.rgbInterleaved.data();
 
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
@@ -271,7 +275,9 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, float* outRgbInterleaved)
         }
     }
 
-    applyColorMatrixInPlace(outRgbInterleaved, static_cast<size_t>(W) * H, camToSrgb);
+    applyColorMatrixInPlace(outRgbInterleaved, outPix, camToSrgb);
+    out.width = W;
+    out.height = H;
     return NnDemosaicStatus::Ok;
 }
 
