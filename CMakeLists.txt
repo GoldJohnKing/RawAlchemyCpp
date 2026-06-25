@@ -447,6 +447,7 @@ set(RA_LIBRARY_SOURCES
     src/win_unicode.cpp
     src/nn_nan_guard.cpp
     src/nn_preprocess.cpp
+    src/nn_postprocess.cpp
 )
 
 # Add C API sources when building the C API
