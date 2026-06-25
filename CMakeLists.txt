@@ -445,6 +445,7 @@ set(RA_LIBRARY_SOURCES
     src/lens_correction.cpp
     src/exif_injector.cpp
     src/win_unicode.cpp
+    src/nn_nan_guard.cpp
 )
 
 # Add C API sources when building the C API
@@ -642,6 +643,19 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     # (changes wavelet denoise accumulation order).
     target_compile_options(raw_r PUBLIC ${RA_LIBRAW_FP_OPTS})
     # lensfun & libtiff: no fast-math flags (keep strict FP)
+endif()
+
+# nn_nan_guard.cpp MUST NOT use -ffast-math (would delete isnan/isinf guards).
+# Applied per-file because the whole raw_alchemy_core target uses -ffast-math
+# above; this override restores strict FP for just the guard TU.
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
+        COMPILE_OPTIONS "-fno-fast-math"
+    )
+elseif(MSVC)
+    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
+        COMPILE_OPTIONS "/fp:strict"
+    )
 endif()
 
 # --- 3. Architecture tuning & warnings ---
