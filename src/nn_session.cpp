@@ -50,23 +50,16 @@ std::string parentDir(const std::string& path) {
     return (slash == std::string::npos) ? std::string{} : path.substr(0, slash);
 }
 
-// Forward-declared so the OrtDmlApi function-pointer signature below can name it
-// without pulling in <d3d12.h> (we always pass nullptr — ORT creates the device).
-struct ID3D12Device;
-
-// Minimal ABI-matching definition of OrtDmlApi for ORT 1.24. The full struct
-// ships in dml_provider_factory.h, which is only included in the DirectML ORT
-// package (onnxruntime-win-x64-directml-*), NOT the generic GitHub release zip
-// that this project vendors. GetExecutionProviderApi("DML",...) returns a
-// pointer whose first (and, in 1.24, only) slot is this function pointer, so a
-// single-member struct matches the ABI. Layout verified against the
-// onnxruntime_c_api.h docstring for GetExecutionProviderApi (line ~3733):
-//   "the provider_api pointer can be cast to the OrtDmlApi* when the
-//    provider_name is 'DML'."
+// Hand-defined because the generic ORT GitHub-release package omits
+// dml_provider_factory.h. Pinned to ORT_API_VERSION; replace with
+// #include <dml_provider_factory.h> once the DirectML-capable onnxruntime
+// package is adopted (Plan B). The real OrtDmlApi has 6 members in 1.24
+// (_DML, _DML1, CreateGPUAllocationFromD3DResource, FreeGPUAllocation,
+// GetD3D12ResourceFromAllocation, _DML2); only slot 0 (_DML, the device_id
+// form) is used here.
 struct OrtDmlApi {
     OrtStatus* (*SessionOptionsAppendExecutionProvider_DML)(
-        OrtSessionOptions* options, ID3D12Device* device,
-        int device_id, bool bypass_runtime_pool_resource_lifetime_rules);
+        OrtSessionOptions* options, int device_id);
 };
 #endif
 
@@ -105,25 +98,24 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
     sopts.DisableMemPattern();
 
     // ORT 1.24 exposes DML via GetExecutionProviderApi("DML") → OrtDmlApi*, NOT
-    // as an OrtApi struct member (Task 9 / C1 fix: the old
+    // as an OrtApi struct member (the old
     // OrtApi::SessionOptionsAppendExecutionProvider_DML does not exist in 1.24).
     // GetExecutionProviderApi is exported by every onnxruntime.dll (generic or
     // DirectML build), so this links against the generic lib we vendor. With a
     // generic runtime DLL the call returns an error → Ort::ThrowOnError throws →
     // init() catches it → graceful fallback to traditional demosaic (design
     // sec 6.1). A DirectML-capable DLL is a deployment/packaging concern.
+    // The 2-arg _DML form takes only device_id; ORT internally enumerates +
+    // creates the D3D12 device (device_id 0 = primary DX12 adapter via
+    // IDXGIFactory). This is the "simplest v1 form" from design sec 3.3 (ORT
+    // owns DMLCreateDevice). GetExecutionProviderApi writes into a `const void*`
+    // out-param (the ORT C API signature), which we then cast to OrtDmlApi*.
     const void* dmlApiVoid = nullptr;
     Ort::ThrowOnError(Ort::GetApi().GetExecutionProviderApi(
         "DML", ORT_API_VERSION, &dmlApiVoid));
     const OrtDmlApi* dmlApi = static_cast<const OrtDmlApi*>(dmlApiVoid);
-    // device=nullptr → ORT enumerates + creates the D3D12 device itself
-    // (device_id 0 = primary DX12 adapter, via IDXGIFactory). bypass_...=false
-    // uses ORT's standard DML resource-lifetime management. This is the
-    // "simplest v1 form" from design sec 3.3 (ORT owns DMLCreateDevice).
     Ort::ThrowOnError(dmlApi->SessionOptionsAppendExecutionProvider_DML(
-        static_cast<OrtSessionOptions*>(sopts),
-        /*device=*/nullptr, /*device_id=*/0,
-        /*bypass_runtime_pool_resource_lifetime_rules=*/false));
+        static_cast<OrtSessionOptions*>(sopts), /*device_id=*/0));
 
 #elif defined(__ANDROID__)
     // --- QNN HTP FP16 EP (design sec 3.2) ---
