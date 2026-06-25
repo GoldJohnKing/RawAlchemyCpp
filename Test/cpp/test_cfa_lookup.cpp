@@ -29,7 +29,7 @@ int main() {
     // Test 3: X-Trans color lookup (standard Fujifilm pattern)
     {
         // Standard X-Trans ILC pattern (simplified)
-        unsigned char xtrans[6][6] = {
+        char xtrans[6][6] = {
             { 1, 2, 1, 1, 0, 1 },
             { 0, 1, 0, 2, 1, 2 },
             { 1, 2, 1, 1, 0, 1 },

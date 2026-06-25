@@ -606,6 +606,23 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64" AND CMAKE_CXX_COMPILER_ID MATCHES "C
     target_compile_definitions(raw_alchemy_core PUBLIC RA_HAS_FLOAT16)
 endif()
 
+# ---- Unit tests ----
+option(BUILD_TESTS "Build RawAlchemyCpp C++ unit tests" OFF)
+if(BUILD_TESTS)
+    enable_testing()
+    file(GLOB RA_TEST_SOURCES CONFIGURE_DEPENDS
+         "${CMAKE_CURRENT_SOURCE_DIR}/Test/cpp/*.cpp")
+    foreach(test_src ${RA_TEST_SOURCES})
+        get_filename_component(test_name ${test_src} NAME_WE)
+        add_executable(${test_name} ${test_src})
+        target_link_libraries(${test_name} PRIVATE raw_alchemy_core)
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(${test_name} PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+        add_test(NAME ${test_name} COMMAND ${test_name})
+    endforeach()
+endif()
+
 # ---- Status ----
 message(STATUS "")
 message(STATUS "=== Raw Alchemy (C++ Edition) ===")
