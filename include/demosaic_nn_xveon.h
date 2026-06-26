@@ -35,6 +35,12 @@ struct NnDemosaicInput {
     float xyzToCam[9] = {1.0f, 0.0f, 0.0f,
                          0.0f, 1.0f, 0.0f,
                          0.0f, 0.0f, 1.0f};
+
+    /** If true, skip the camRGB->sRGB color matrix + low-side clamp and output
+     *  the model's raw camRGB (white-balanced, linear). The caller applies the
+     *  camera matrix themselves. Default false (sRGB output for backward compat).
+     *  Use true when feeding a ProPhoto/vLog/LUT pipeline to avoid sRGB gamut clip. */
+    bool outputCamRgb = false;
 };
 
 /** Output bundle for nnDemosaic(). `rgbInterleaved` is [width*height*3],

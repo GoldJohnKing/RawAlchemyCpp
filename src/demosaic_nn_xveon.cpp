@@ -254,8 +254,12 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     }
 
     // --- Step 7: normalize accumulation, crop padding, apply color matrix ---
+    // SKIPPED when outputCamRgb=true: caller applies their own matrix (e.g. camRGB->ProPhoto
+    // via LibRaw cam_xyz) to avoid sRGB-gamut clipping for wide-gamut pipelines.
     float camToSrgb[9];
-    computeCamRgbToSrgb(camToSrgb, in.xyzToCam);
+    if (!in.outputCamRgb) {
+        computeCamRgbToSrgb(camToSrgb, in.xyzToCam);
+    }
 
     const size_t outPix = static_cast<size_t>(W) * static_cast<size_t>(H);
     out.rgbInterleaved.assign(outPix * 3, 0.0f);
@@ -275,7 +279,9 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         }
     }
 
-    applyColorMatrixInPlace(outRgbInterleaved, outPix, camToSrgb);
+    if (!in.outputCamRgb) {
+        applyColorMatrixInPlace(outRgbInterleaved, outPix, camToSrgb);
+    }
     out.width = W;
     out.height = H;
     return NnDemosaicStatus::Ok;
