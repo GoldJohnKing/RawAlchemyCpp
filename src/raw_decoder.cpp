@@ -26,6 +26,11 @@
 #include "demosaic_markesteijn.h"
 #include "denoise_xtrans.h"
 
+// NN demosaic path (Plan B Task 3): dispatch + session + camRGB->ProPhoto adapter
+#include "demosaic_dispatch.h"
+#include "nn_session.h"
+#include "nn_color_adapt.h"
+
 namespace rawalchemy {
 
 // ---- X-Trans denoise config (set before dcraw_process, read in the callback) ----
@@ -220,6 +225,114 @@ public:
     using LibRaw::callbacks;
 };
 
+// ---- NN demosaic path (Plan B Task 3) ----
+// When params.enableNnDemosaic && !halfSize, decodeRaw branches here BEFORE
+// dcraw_process. We bypass LibRaw's demosaic + color conversion entirely:
+// raw2image() gives black-subtracted CFA, the NN produces linear camRGB, and
+// camRgbToProPhotoLinear merges us back into the classical pipeline's contract
+// (linear ProPhoto [0,1]) so lens/vLog/LUT are unchanged.
+
+/// Populate NnDemosaicInput.wbRgb + .xyzToCam from LibRaw color data.
+/// cam_mul is G-normalized (index 1 is G1). cam_xyz is the 4x4 XYZ->cam matrix;
+/// we drop the 4th column and take the leading 3x3 row-major.
+static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
+    const auto& color = raw.imgdata.color;
+    // WB: cam_mul[0..3] are R,G1,B,G2; G-normalize so the green multiplier is 1.
+    const float g = color.cam_mul[1] > 0 ? color.cam_mul[1] : 1.0f;
+    in.wbRgb[0] = color.cam_mul[0] / g;
+    in.wbRgb[1] = 1.0f;
+    in.wbRgb[2] = color.cam_mul[2] / g;
+    // cam_xyz: LibRaw stores 4x3; take the leading 3x3 row-major.
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            in.xyzToCam[i * 3 + j] = static_cast<float>(color.cam_xyz[i][j]);
+}
+
+/// Decode via the x-veon NN demosaic. Returns linear ProPhoto RGB [0,1].
+/// Throws std::runtime_error on any failure (caller surfaces via RaResult).
+static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
+                                const DecodeParams& params) {
+    // raw2image(): black-subtracted CFA into imgdata.image[], NO WB / demosaic.
+    int ret = rawProcessor.raw2image();
+    if (ret != LIBRAW_SUCCESS) {
+        throwLibRawError(ret, "raw2image (NN path)");
+    }
+
+    auto& img = rawProcessor.imgdata;
+    const int w = static_cast<int>(img.sizes.width);
+    const int h = static_cast<int>(img.sizes.height);
+
+    auto (*image)[4] = reinterpret_cast<unsigned short (*)[4]>(img.image);
+    if (!image) {
+        throw std::runtime_error("[NN] imgdata.image is null after raw2image");
+    }
+
+    // One-time NN session init (idempotent singleton — Plan A's NnDemosaicSession).
+    auto& sess = NnDemosaicSession::instance();
+    if (!sess.isReady()) {
+        NnSessionConfig cfg;
+        cfg.bayerModelPath = params.nnBayerModelPath;
+        cfg.xtransModelPath = params.nnXtransModelPath;
+#ifdef _WIN32
+        cfg.directmlDllPath = params.nnDirectmlDllPath;
+#elif defined(__ANDROID__)
+        // DecodeParams.nnQnnContextBinaryDir (Task 2) has no matching field on
+        // Plan A's NnSessionConfig — the session takes socModel (an SoC string),
+        // not a context-binary directory. Left at default "0"; reconcile in a
+        // follow-up (the NN path is unreachable until models are wired, Task 8).
+#endif
+        if (!sess.init(cfg)) {
+            throw std::runtime_error("[NN] session init failed");
+        }
+    }
+
+    // extractCfa divides by whiteLevel, landing the CFA in [0,1]. The NN's own
+    // normalizeCfaInPlace expects (raw-black)/(white-black); since the CFA is
+    // already normalized and raw2image subtracted black, we pass blackLevel=0
+    // and whiteLevel=1 so the NN normalize step is an identity (no double scale).
+    const float rawMax = static_cast<float>(img.color.maximum);
+    if (!(rawMax > 0.0f)) {
+        throw std::runtime_error("[NN] imgdata.color.maximum is zero/invalid");
+    }
+    AlignedVector<float> cfa = extractCfa(image, w, h, rawProcessor, rawMax);
+
+    NnDemosaicInput in{};
+    in.width = w;
+    in.height = h;
+    in.filters = img.idata.filters;
+    in.cfaMosaic = cfa.data();
+    in.blackLevel = 0.0f;   // raw2image already subtracted black
+    in.whiteLevel = 1.0f;   // cfa already normalized by extractCfa above
+    fillNnMetadata(in, rawProcessor);
+
+    NnDemosaicOutput out;
+    NnDemosaicStatus st = demosaicDispatch(in, out, DemosaicPath::Neural);
+    if (st != NnDemosaicStatus::Ok) {
+        const char* reason = "unknown";
+        switch (st) {
+            case NnDemosaicStatus::SessionNotReady: reason = "session not ready"; break;
+            case NnDemosaicStatus::NaNOutput:       reason = "NaN output"; break;
+            case NnDemosaicStatus::InferenceFailed: reason = "inference failed"; break;
+            case NnDemosaicStatus::InvalidParam:    reason = "invalid param"; break;
+            default: break;
+        }
+        throw std::runtime_error(std::string("[NN] demosaic failed: ") + reason);
+    }
+
+    // out.rgbInterleaved is [w*h*3] linear white-balanced camRGB (nnDemosaic
+    // always outputs camRGB — outputCamRgb was removed in Plan A). Convert to
+    // linear ProPhoto using LibRaw's cam_xyz (the same matrix the classical
+    // output_color=4 path uses) so we are bit-identical into vLog/LUT.
+    ImageBuffer result(w, h, 3);
+    float camXyz[9];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            camXyz[i * 3 + j] = static_cast<float>(img.color.cam_xyz[i][j]);
+    camRgbToProPhotoLinear(result.ptr(), out.rgbInterleaved.data(),
+                           result.pixelCount(), camXyz);
+    return result;
+}
+
 // ---- decodeRaw ----
 ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
                        ExifCollector* exifCollector) {
@@ -338,6 +451,16 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         }
     } else {
         p.fbdd_noiserd = params.fbddNoiserd;
+    }
+
+    // --- NN demosaic branch (final full-res only; preview always classical) ---
+    // Branch BEFORE dcraw_process: the NN path calls raw2image() itself and
+    // bypasses LibRaw's demosaic + color conversion, returning linear ProPhoto
+    // directly. Unreachable unless params.enableNnDemosaic is set AND models are
+    // loaded (Task 8 exercises it). Throws on failure; the CAPI layer wraps the
+    // exception into an RaResult.
+    if (params.enableNnDemosaic && !params.halfSize) {
+        return decodeRawNn(rawProcessor, params);
     }
 
     // --- Process (demosaic + color conversion + gamma) ---
