@@ -81,6 +81,16 @@ struct DecodeParams {
     /// Demosaic algorithm selection (default AUTO: Bayer→RCD, X-Trans→Markesteijn).
     /// Set to LIBRAW_FALLBACK to use the original LibRaw path (uses demosaicQuality).
     DemosaicAlgorithm demosaicAlgorithm = DemosaicAlgorithm::AUTO;
+
+    /// Enable NN (x-veon) demosaic. When true, the decoder dispatches to the NN
+    /// path instead of the classical RCD/Markesteijn kernels. Ignored for halfSize.
+    bool enableNnDemosaic = false;
+
+    // Paths populated by the CAPI layer before calling decodeRaw when enableNnDemosaic:
+    std::string nnBayerModelPath;
+    std::string nnXtransModelPath;
+    std::string nnQnnContextBinaryDir;   // Android only
+    std::string nnDirectmlDllPath;       // Windows only
 };
 
 /**

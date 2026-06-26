@@ -17,6 +17,7 @@
 
 #include <libraw/libraw.h>
 #include <cstring>
+#include <cstdlib>
 #include <string>
 #include <stdexcept>
 
@@ -317,7 +318,8 @@ RA_API RaResult RA_CALL raProcessFile(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 ) {
     if (!inputPath || !outputPath) {
         setError("raProcessFile: null path parameter");
@@ -337,7 +339,13 @@ RA_API RaResult RA_CALL raProcessFile(
             ? rawalchemy::createExifCollector() : nullptr;
 
         // Decode (with optional EXIF collection)
-        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
+        rawalchemy::DecodeParams params;
+        params.enableNnDemosaic = (enableNnDemosaic != 0);
+        // NN model paths: populated by caller via env or set globally (Task 7).
+        // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
+        if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
+        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
 
         // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
@@ -387,7 +395,8 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 ) {
     if (!inputPath || !outputPath) {
         setError("raProcessFileWithLUT: null path parameter");
@@ -406,7 +415,13 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         rawalchemy::ExifCollector* exifCollector = isJpeg
             ? rawalchemy::createExifCollector() : nullptr;
 
-        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
+        rawalchemy::DecodeParams params;
+        params.enableNnDemosaic = (enableNnDemosaic != 0);
+        // NN model paths: populated by caller via env or set globally (Task 7).
+        // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
+        if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
+        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
         rawalchemy::LUT3D lut;
@@ -468,7 +483,8 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     float       evOffset,
     int         enableLensCorrection,
     const char* customLensfunDb,
-    RaImageBuffer* outBuf
+    RaImageBuffer* outBuf,
+    int         enableNnDemosaic
 ) {
     if (!inputPath || !outBuf) {
         setError("raProcessToBuffer: null parameter");
@@ -478,7 +494,13 @@ RA_API RaResult RA_CALL raProcessToBuffer(
 
     try {
         // Decode
-        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        rawalchemy::DecodeParams params;
+        params.enableNnDemosaic = (enableNnDemosaic != 0);
+        // NN model paths: populated by caller via env or set globally (Task 7).
+        // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
+        if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
+        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
 
         // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));

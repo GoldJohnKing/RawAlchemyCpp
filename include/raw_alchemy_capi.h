@@ -34,6 +34,9 @@ typedef enum RaResult_ {
     RA_ERR_WRITE_FAILED    = -7,
     RA_ERR_NO_LENS_PROFILE = -8,
     RA_ERR_OUT_OF_MEMORY   = -9,
+    RA_ERR_NN_NOT_INITIALIZED  = -10,
+    RA_ERR_NN_NAN_OUTPUT       = -11,
+    RA_ERR_NN_INFERENCE_FAILED = -12,
 } RaResult;
 
 /* ----------------------------------------------------------------
@@ -86,6 +89,9 @@ RA_API int RA_CALL raImageGetDataSizeBytes(RaImageBuffer buf);
  *  @param jpegQuality JPEG quality 1-100 (only used for JPEG output).
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
+ *  @param enableNnDemosaic  0 = classical demosaic (RCD/Markesteijn). Non-zero = NN demosaic
+ *                           (x-veon). Ignored when halfSize != 0 (preview path). If NN is not
+ *                           initialized or fails, returns RA_ERR_NN_* (caller decides retry).
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raProcessFile(
     const char* inputPath,
@@ -96,7 +102,8 @@ RA_API RaResult RA_CALL raProcessFile(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 );
 
 /** Process a RAW file with a pre-parsed LUT (avoids repeated file I/O).
@@ -119,6 +126,9 @@ RA_API RaResult RA_CALL raProcessFile(
  *  @param jpegQuality JPEG quality 1-100.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
+ *  @param enableNnDemosaic  0 = classical demosaic (RCD/Markesteijn). Non-zero = NN demosaic
+ *                           (x-veon). Ignored when halfSize != 0 (preview path). If NN is not
+ *                           initialized or fails, returns RA_ERR_NN_* (caller decides retry).
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raProcessFileWithLUT(
     const char* inputPath,
@@ -132,7 +142,8 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 );
 
 /** Process a RAW file through the full pipeline and return pixel data.
@@ -147,6 +158,9 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
  *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
+ *  @param enableNnDemosaic  0 = classical demosaic (RCD/Markesteijn). Non-zero = NN demosaic
+ *                           (x-veon). Ignored when halfSize != 0 (preview path). If NN is not
+ *                           initialized or fails, returns RA_ERR_NN_* (caller decides retry).
  *  @param outBuf      Receives the processed image. Caller must destroy.
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raProcessToBuffer(
@@ -157,7 +171,8 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     float       evOffset,
     int         enableLensCorrection,
     const char* customLensfunDb,
-    RaImageBuffer* outBuf
+    RaImageBuffer* outBuf,
+    int         enableNnDemosaic
 );
 
 /* ----------------------------------------------------------------
