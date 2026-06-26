@@ -55,14 +55,6 @@ int main() {
     assert(nnDemosaic(in, out) == NnDemosaicStatus::InvalidParam);
     in.height = savedH;
 
-    // --- outputCamRgb flag accepted (struct field exists, default false) ---
-    {
-        rawalchemy::NnDemosaicInput in2{};
-        assert(in2.outputCamRgb == false);  // default
-        in2.outputCamRgb = true;
-        assert(in2.outputCamRgb == true);
-    }
-
     std::cout << "test_nn_demosaic_xveon: OK\n";
     return 0;
 }

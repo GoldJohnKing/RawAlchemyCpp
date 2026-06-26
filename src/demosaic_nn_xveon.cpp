@@ -10,7 +10,8 @@
 //   5. build canonical masks + trapezoid blend window (tile-invariant)
 //   6. OpenMP-parallel tile loop: pack [1,4,288,288] input -> ORT Run ->
 //      NaN guard -> trapezoid-weighted accumulate into RGB/weight buffers
-//   7. divide accumulate by weights, crop padding, apply camRGB->sRGB matrix
+//   7. divide accumulate by weights, crop padding (output: raw camRGB;
+//      caller applies the camera color matrix downstream)
 //
 // Deviation from the design: the design lists a highlight-reconstruction step
 // (inpaint-opposed, §2.3 step 4) before WB. No highlight-recon primitive was
@@ -253,14 +254,11 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         return NnDemosaicStatus::InferenceFailed;
     }
 
-    // --- Step 7: normalize accumulation, crop padding, apply color matrix ---
-    // SKIPPED when outputCamRgb=true: caller applies their own matrix (e.g. camRGB->ProPhoto
-    // via LibRaw cam_xyz) to avoid sRGB-gamut clipping for wide-gamut pipelines.
-    float camToSrgb[9];
-    if (!in.outputCamRgb) {
-        computeCamRgbToSrgb(camToSrgb, in.xyzToCam);
-    }
-
+    // --- Step 7: normalize accumulation, crop padding ---
+    // Output is the model's raw camRGB (white-balanced, linear, negatives
+    // preserved — unclamped). The caller applies the camera color matrix
+    // (e.g. camRGB->ProPhoto via LibRaw cam_xyz) downstream to avoid an
+    // sRGB-gamut intermediate that would clip wide-gamut colors.
     const size_t outPix = static_cast<size_t>(W) * static_cast<size_t>(H);
     out.rgbInterleaved.assign(outPix * 3, 0.0f);
     float* outRgbInterleaved = out.rgbInterleaved.data();
@@ -279,9 +277,6 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         }
     }
 
-    if (!in.outputCamRgb) {
-        applyColorMatrixInPlace(outRgbInterleaved, outPix, camToSrgb);
-    }
     out.width = W;
     out.height = H;
     return NnDemosaicStatus::Ok;
