@@ -17,10 +17,11 @@
 
 namespace rawalchemy {
 
-/// ProPhoto RGB primaries in XYZ (D65-adapted).
+/// sRGB(D65)→ProPhoto(D65) RGB-to-RGB matrix (NOT ProPhoto→XYZ).
 /// Matches LibRaw's LibRaw_constants::prophoto_rgb (colorconst.cpp:38-41).
-/// LibRaw's convert_to_rgb() multiplies this by rgb_cam to produce the
-/// final camera→ProPhoto matrix (postprocessing_utils_dcrdefs.cpp:98-101).
+/// LibRaw's convert_to_rgb() composes the camera→ProPhoto matrix as
+/// out_cam = prophoto_rgb · rgb_cam for output_color=4
+/// (postprocessing_utils_dcrdefs.cpp:98-101).
 static constexpr double PROPHOTO_RGB[3][3] = {
     {0.529317, 0.330092, 0.140588},
     {0.098368, 0.873465, 0.028169},

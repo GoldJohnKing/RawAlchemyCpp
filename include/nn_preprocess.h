@@ -15,6 +15,10 @@ struct CfaPhase {
     int dx = 0;
     int period = 2;       // 2 for Bayer, 6 for X-Trans
     bool isXtrans = false;
+    /** Camera's actual X-Trans pattern [6][6] (0=R,1=G,2=B). For X-Trans,
+     *  populated from imgdata.idata.xtrans — cameras ship different rotations.
+     *  Used by canonicalCfaColor + makeCanonicalMasks. */
+    int cameraPattern[6][6] = {};
 };
 
 /** Detect the CFA family and phase. For Bayer orientations other than RGGB,

@@ -30,6 +30,7 @@
 #include "demosaic_dispatch.h"
 #include "nn_session.h"
 #include "nn_color_adapt.h"
+#include "color_convert.h"  // computeProPhotoMatrix: LibRaw out_cam = prophoto_rgb · rgb_cam
 
 namespace rawalchemy {
 
@@ -85,6 +86,10 @@ static AlignedVector<float> extractCfa(const unsigned short (*image)[4],
             } else {
                 c = bayerColor(row, col, raw.imgdata.idata.filters);
             }
+            // Caller (decodeRawNn) uses raw2image_ex(1), which runs adjust_bl()
+            // and subtracts the real per-channel black during the copy — matching
+            // the classical dcraw_process path. So image[][c] is already
+            // black-subtracted here; do NOT subtract again.
             cfa[static_cast<size_t>(row) * w + col] =
                 static_cast<float>(image[static_cast<size_t>(row) * w + col][c]) / whiteLevel;
         }
@@ -233,11 +238,9 @@ public:
 // (linear ProPhoto [0,1]) so lens/vLog/LUT are unchanged.
 
 /// Populate NnDemosaicInput.wbRgb + .xyzToCam from LibRaw color data.
-/// cam_mul is G-normalized (index 1 is G1). cam_xyz is the 4x4 XYZ->cam matrix;
-/// we drop the 4th column and take the leading 3x3 row-major.
 static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
     const auto& color = raw.imgdata.color;
-    // WB: cam_mul[0..3] are R,G1,B,G2; G-normalize so the green multiplier is 1.
+    // cam_mul[0..3] are R,G1,B,G2; G-normalize so the green multiplier is 1.
     const float g = color.cam_mul[1] > 0 ? color.cam_mul[1] : 1.0f;
     in.wbRgb[0] = color.cam_mul[0] / g;
     in.wbRgb[1] = 1.0f;
@@ -252,10 +255,16 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
 /// Throws std::runtime_error on any failure (caller surfaces via RaResult).
 static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
                                 const DecodeParams& params) {
-    // raw2image(): black-subtracted CFA into imgdata.image[], NO WB / demosaic.
-    int ret = rawProcessor.raw2image();
+    // raw2image_ex(1): copy CFA into imgdata.image[] AND subtract the real
+    // per-channel black (runs adjust_bl() first, then subtracts cblack during
+    // the copy — see LibRaw raw2image.cpp:427-432). This MUST match the
+    // classical dcraw_process path, which uses the same raw2image_ex(1). The
+    // plain raw2image() does NOT subtract black, leaving a per-channel offset
+    // that — after WB amplifies R and B far more than G — renders as a strong
+    // magenta cast (the model's residual CFA skip passes the imbalance through).
+    int ret = rawProcessor.raw2image_ex(1);
     if (ret != LIBRAW_SUCCESS) {
-        throwLibRawError(ret, "raw2image (NN path)");
+        throwLibRawError(ret, "raw2image_ex (NN path)");
     }
 
     auto& img = rawProcessor.imgdata;
@@ -305,6 +314,14 @@ static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
     in.whiteLevel = 1.0f;   // cfa already normalized by extractCfa above
     fillNnMetadata(in, rawProcessor);
 
+    // Copy the camera's ACTUAL X-Trans pattern — cameras ship different
+    // rotations of the 6×6 arrangement; the hardcoded canonical does NOT match.
+    if (img.idata.filters == 9) {
+        for (int yy = 0; yy < 6; ++yy)
+            for (int xx = 0; xx < 6; ++xx)
+                in.xtransPattern[yy][xx] = img.idata.xtrans[yy][xx];
+    }
+
     NnDemosaicOutput out;
     NnDemosaicStatus st = demosaicDispatch(in, out, DemosaicPath::Neural);
     if (st != NnDemosaicStatus::Ok) {
@@ -321,15 +338,29 @@ static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
 
     // out.rgbInterleaved is [w*h*3] linear white-balanced camRGB (nnDemosaic
     // always outputs camRGB — outputCamRgb was removed in Plan A). Convert to
-    // linear ProPhoto using LibRaw's cam_xyz (the same matrix the classical
-    // output_color=4 path uses) so we are bit-identical into vLog/LUT.
+    // linear ProPhoto via LibRaw's rgb_cam (out_cam = prophoto_rgb · rgb_cam,
+    // the same matrix the classical output_color=4 path uses) so we are
+    // bit-identical into vLog/LUT.
+
     ImageBuffer result(w, h, 3);
-    float camXyz[9];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            camXyz[i * 3 + j] = static_cast<float>(img.color.cam_xyz[i][j]);
+
+    // camRGB→ProPhoto matching LibRaw convert_to_rgb() output_color=4 exactly:
+    //   out_cam = prophoto_rgb · rgb_cam   (postprocessing_utils_dcrdefs.cpp:98-101)
+    // rgb_cam is derived from cam_xyz by cam_xyz_coeff() (utils_dcraw.cpp:282-313),
+    // so it already carries the correct D65 white-point normalization. The NN
+    // output is cam_mul-WB'd (equivalent to scale_colors under use_camera_wb=1),
+    // which is the input rgb_cam expects — apply directly. Do NOT add daylight
+    // pre_mul on top (it would double-white-balance and re-introduce a cast).
+    float outCam[3][4];
+    computeProPhotoMatrix(img.color.rgb_cam, outCam);
+    const float camToProPhoto[9] = {
+        outCam[0][0], outCam[0][1], outCam[0][2],
+        outCam[1][0], outCam[1][1], outCam[1][2],
+        outCam[2][0], outCam[2][1], outCam[2][2]
+    };
     camRgbToProPhotoLinear(result.ptr(), out.rgbInterleaved.data(),
-                           result.pixelCount(), camXyz);
+                           result.pixelCount(), camToProPhoto);
+
     return result;
 }
 
@@ -524,6 +555,7 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     LibRaw::dcraw_clear_mem(processed);
+
     return result;
 }
 

@@ -267,7 +267,7 @@ set(RA_QNN_RUNTIME_DIR "" CACHE PATH "Path to dir containing libQnnHtp.so + Skel
 # scripts/fetch-nn-deps.sh (parent repo). DirectML version lives only in the
 # fetch script (not consumed by CMake).
 set(ORT_VERSION "1.24.1")
-set(QNN_RUNTIME_VERSION "2.34.0")
+set(QNN_RUNTIME_VERSION "2.42.0")
 
 if(RA_ENABLE_NN_DEMOSAIC)
     # Always define the cache dir so DIRECTML_DLL_PATH (Windows) and
@@ -281,7 +281,7 @@ if(RA_ENABLE_NN_DEMOSAIC)
         if(WIN32)
             set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-win-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
         elseif(ANDROID)
-            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-android-${ORT_VERSION}" CACHE PATH "" FORCE)
+            set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-android-qnn-${ORT_VERSION}" CACHE PATH "" FORCE)
         elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
             set(RA_ORT_ROOT "${RA_NN_CACHE}/onnxruntime-linux-x64-${ORT_VERSION}" CACHE PATH "" FORCE)
         endif()
@@ -563,6 +563,11 @@ endif()
 # Link math library on Linux
 if(UNIX)
     target_link_libraries(raw_alchemy_core PUBLIC m)
+endif()
+
+# Android: link liblog for __android_log_write (diagnostics)
+if(ANDROID)
+    target_link_libraries(raw_alchemy_core PUBLIC log)
 endif()
 
 # OpenMP for parallel processing (optional). On the FFI Windows clang-cl build the

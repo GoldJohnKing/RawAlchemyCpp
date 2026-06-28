@@ -327,6 +327,10 @@ RA_API RaResult RA_CALL raProcessFile(
     }
     clearError();
 
+    // DEBUG: classical fallback removed. When NN demosaic is requested and fails
+    // (init/null-DML, NaN guard, inference error), the exception propagates so the
+    // caller sees the failure reason in raGetLastError() instead of a silent retry.
+    rawalchemy::ExifCollector* exifCollector = nullptr;
     try {
         // Determine output format from extension
         std::string ext = outputPath;
@@ -335,8 +339,7 @@ RA_API RaResult RA_CALL raProcessFile(
                       (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
 
         // Create EXIF collector for JPEG output
-        rawalchemy::ExifCollector* exifCollector = isJpeg
-            ? rawalchemy::createExifCollector() : nullptr;
+        exifCollector = isJpeg ? rawalchemy::createExifCollector() : nullptr;
 
         // Decode (with optional EXIF collection)
         rawalchemy::DecodeParams params;
@@ -345,6 +348,10 @@ RA_API RaResult RA_CALL raProcessFile(
         // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
         if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
         if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
+        // DirectML.dll path (Windows). Set by the Rust host to the extraction
+        // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
+        // app-local DirectML.dll (defense-in-depth on top of the host preload).
+        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
 
         // Metadata (for lens correction)
@@ -379,6 +386,7 @@ RA_API RaResult RA_CALL raProcessFile(
         }
         return RA_OK;
     } catch (...) {
+        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
         return catchExceptions("raProcessFile");
     }
 }
@@ -404,6 +412,8 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     }
     clearError();
 
+    // DEBUG: classical fallback removed — see raProcessFile.
+    rawalchemy::ExifCollector* exifCollector = nullptr;
     try {
         // Determine output format from extension
         std::string ext = outputPath;
@@ -412,8 +422,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
                       (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
 
         // Create EXIF collector for JPEG output
-        rawalchemy::ExifCollector* exifCollector = isJpeg
-            ? rawalchemy::createExifCollector() : nullptr;
+        exifCollector = isJpeg ? rawalchemy::createExifCollector() : nullptr;
 
         rawalchemy::DecodeParams params;
         params.enableNnDemosaic = (enableNnDemosaic != 0);
@@ -421,6 +430,10 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
         if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
         if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
+        // DirectML.dll path (Windows). Set by the Rust host to the extraction
+        // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
+        // app-local DirectML.dll (defense-in-depth on top of the host preload).
+        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
@@ -471,6 +484,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         }
         return RA_OK;
     } catch (...) {
+        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
         return catchExceptions("raProcessFileWithLUT");
     }
 }
@@ -492,6 +506,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     }
     clearError();
 
+    // DEBUG: classical fallback removed — see raProcessFile.
     try {
         // Decode
         rawalchemy::DecodeParams params;
@@ -500,6 +515,10 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
         if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
         if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
+        // DirectML.dll path (Windows). Set by the Rust host to the extraction
+        // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
+        // app-local DirectML.dll (defense-in-depth on top of the host preload).
+        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
 
         // Metadata (for lens correction)

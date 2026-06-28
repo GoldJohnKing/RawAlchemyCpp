@@ -28,6 +28,7 @@
 #include "nn_session.h"
 
 #include <onnxruntime_cxx_api.h>  // Ort::Session, Ort::Value, Ort::Run
+#include <cstring>
 
 #include <algorithm>
 #include <array>
@@ -79,7 +80,13 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         return NnDemosaicStatus::SessionNotReady;
     }
 
-    const CfaPhase phase = detectCfaPhase(in.filters);
+    CfaPhase phase = detectCfaPhase(in.filters);
+    // Override the X-Trans pattern with the camera's actual one (not the hardcoded canonical)
+    if (phase.isXtrans) {
+        for (int i = 0; i < 6; ++i)
+            for (int j = 0; j < 6; ++j)
+                phase.cameraPattern[i][j] = in.xtransPattern[i][j];
+    }
     Ort::Session* ort = session.sessionForCfaPeriod(phase.period);
     if (ort == nullptr) {
         // Session ready but no model loaded for this CFA period (e.g. X-Trans

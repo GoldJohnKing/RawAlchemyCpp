@@ -52,9 +52,16 @@ static const int RGGB_2x2[2][2] = {{0, 1}, {1, 2}};
 
 int canonicalCfaColor(int y, int x, const CfaPhase& phase) {
     if (phase.isXtrans) {
-        // C++ % may be negative for negative operands; normalize to [0, period).
         const int py = ((y % 6) + 6) % 6;
         const int px = ((x % 6) + 6) % 6;
+        // Use camera's actual pattern if populated (different cameras ship
+        // different rotations of the 6×6 X-Trans arrangement). Fall back to
+        // hardcoded canonical if cameraPattern is all zeros (test/synthetic).
+        if (phase.cameraPattern[0][0] != 0 ||
+            phase.cameraPattern[0][1] != 0 ||
+            phase.cameraPattern[5][5] != 0) {
+            return phase.cameraPattern[py][px];
+        }
         return XTRANS_CANONICAL[py][px];
     }
     const int py = ((y % 2) + 2) % 2;

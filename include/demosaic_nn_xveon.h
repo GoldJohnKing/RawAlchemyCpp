@@ -36,6 +36,12 @@ struct NnDemosaicInput {
     float xyzToCam[9] = {1.0f, 0.0f, 0.0f,
                          0.0f, 1.0f, 0.0f,
                          0.0f, 0.0f, 1.0f};
+
+    /** Camera's actual X-Trans CFA pattern [6][6] (0=R, 1=G, 2=B).
+     *  Populated from LibRaw's imgdata.idata.xtrans. Used for mask generation
+     *  and WB color lookup instead of a hardcoded canonical — cameras ship
+     *  different rotations/phases of the X-Trans arrangement. */
+    int xtransPattern[6][6] = {};
 };
 
 /** Output bundle for nnDemosaic(). `rgbInterleaved` is [width*height*3],

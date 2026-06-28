@@ -113,27 +113,31 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
     const void* dmlApiVoid = nullptr;
     Ort::ThrowOnError(Ort::GetApi().GetExecutionProviderApi(
         "DML", ORT_API_VERSION, &dmlApiVoid));
+    // Defense-in-depth: GetExecutionProviderApi may return success but leave the
+    // out-param null when the runtime DLL has no DML EP (generic ORT build). The
+    // subsequent deref would crash with 0xc0000005 (access violation) before ORT
+    // can surface an error. Convert it into a thrown exception so init() catches
+    // it and the caller falls back to classical demosaic.
+    if (dmlApiVoid == nullptr) {
+        throw std::runtime_error(
+            "[NN] DirectML EP not available in this ORT build (dmlApiVoid is null)");
+    }
     const OrtDmlApi* dmlApi = static_cast<const OrtDmlApi*>(dmlApiVoid);
     Ort::ThrowOnError(dmlApi->SessionOptionsAppendExecutionProvider_DML(
         static_cast<OrtSessionOptions*>(sopts), /*device_id=*/0));
 
 #elif defined(__ANDROID__)
-    // --- QNN HTP FP16 EP (design sec 3.2) ---
-    // No CPU EP fallback (design sec 3.4): an op the QNN HTP backend cannot
-    // offload raises instead of silently running on slow CPU. Implemented as a
-    // SESSION config entry (NOT a QNN provider option) per ORT docs.
-    sopts.AddConfigEntry(kOrtSessionOptionsDisableCPUEPFallback, "1");
+    // --- DIAGNOSTIC: CPU-only (temporarily disable QNN to test if fp16 is the issue) ---
     sopts.SetExecutionMode(ORT_SEQUENTIAL);
     sopts.DisableMemPattern();
-
-    // QNN provider options as key/value strings (ORT generic EP append).
-    std::unordered_map<std::string, std::string> qnnOpts;
-    qnnOpts.emplace("backend_path", "libQnnHtp.so");
-    qnnOpts.emplace("htp_performance_mode", "burst");   // max-throughput for batch tile inference
-    qnnOpts.emplace("enable_htp_fp16_precision", "1");  // feed fp32, HTP math in fp16 (design sec 3.2)
-    qnnOpts.emplace("soc_model", cfg.socModel.empty() ? std::string{"0"} : cfg.socModel);
-    qnnOpts.emplace("device_id", "0");
-    sopts.AppendExecutionProvider("QNN", qnnOpts);
+    // QNN EP temporarily disabled for A/B testing
+    // std::unordered_map<std::string, std::string> qnnOpts;
+    // qnnOpts.emplace("backend_path", "libQnnHtp.so");
+    // qnnOpts.emplace("htp_performance_mode", "burst");
+    // qnnOpts.emplace("enable_htp_fp16_precision", "1");
+    // qnnOpts.emplace("soc_model", cfg.socModel.empty() ? std::string{"0"} : cfg.socModel);
+    // qnnOpts.emplace("device_id", "0");
+    // sopts.AppendExecutionProvider("QNN", qnnOpts);
 
 #else
     // --- Linux dev-loop: CPU EP ---
@@ -195,19 +199,18 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
         }
 #endif
     } catch (const Ort::Exception& e) {
-        // EP unavailable, model missing, or graph build error. Per design sec 6.1
-        // this is permanent: leave ready_ false and let the caller fall back.
-        impl_->env = Ort::Env{};  // release the half-built Env
-        impl_->bayerSession.reset();
-        impl_->xtransSession.reset();
-        ready_ = false;
-        return false;
-    } catch (const std::exception&) {
+        // Propagate the ORT error message (don't swallow to stderr — invisible on Android)
         impl_->env = Ort::Env{};
         impl_->bayerSession.reset();
         impl_->xtransSession.reset();
         ready_ = false;
-        return false;
+        throw std::runtime_error(std::string("[NN] ORT session init failed: ") + e.what());
+    } catch (const std::exception& e) {
+        impl_->env = Ort::Env{};
+        impl_->bayerSession.reset();
+        impl_->xtransSession.reset();
+        ready_ = false;
+        throw std::runtime_error(std::string("[NN] session init failed: ") + e.what());
     }
 
     ready_ = true;
