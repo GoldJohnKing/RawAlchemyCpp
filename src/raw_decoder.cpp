@@ -284,9 +284,12 @@ static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
         cfg.xtransModelPath = params.nnXtransModelPath;
 #ifdef _WIN32
         cfg.directmlDllPath = params.nnDirectmlDllPath;
-#elif defined(__ANDROID__)
-        cfg.socModel = params.nnSocModel.empty() ? std::string{"0"} : params.nnSocModel;
-#endif
+        #elif defined(__ANDROID__)
+            cfg.socModel = params.nnSocModel.empty() ? std::string{"0"} : params.nnSocModel;
+            cfg.htpArch = params.nnHtpArch;
+            cfg.ctxDir = params.nnCtxDir;
+            cfg.appVersion = params.nnAppVersion;
+        #endif
         if (!sess.init(cfg)) {
             throw std::runtime_error("[NN] session init failed");
         }

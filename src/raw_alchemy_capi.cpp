@@ -353,6 +353,9 @@ RA_API RaResult RA_CALL raProcessFile(
         // app-local DirectML.dll (defense-in-depth on top of the host preload).
         if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
         if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
+        if (const char* p = std::getenv("RA_NN_HTP_ARCH")) params.nnHtpArch = p;
+        if (const char* p = std::getenv("RA_NN_CTX_DIR")) params.nnCtxDir = p;
+        if (const char* p = std::getenv("RA_NN_APP_VERSION")) params.nnAppVersion = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
 
         // Metadata (for lens correction)
@@ -436,6 +439,9 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         // app-local DirectML.dll (defense-in-depth on top of the host preload).
         if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
         if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
+        if (const char* p = std::getenv("RA_NN_HTP_ARCH")) params.nnHtpArch = p;
+        if (const char* p = std::getenv("RA_NN_CTX_DIR")) params.nnCtxDir = p;
+        if (const char* p = std::getenv("RA_NN_APP_VERSION")) params.nnAppVersion = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
@@ -522,6 +528,9 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         // app-local DirectML.dll (defense-in-depth on top of the host preload).
         if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
         if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
+        if (const char* p = std::getenv("RA_NN_HTP_ARCH")) params.nnHtpArch = p;
+        if (const char* p = std::getenv("RA_NN_CTX_DIR")) params.nnCtxDir = p;
+        if (const char* p = std::getenv("RA_NN_APP_VERSION")) params.nnAppVersion = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
 
         // Metadata (for lens correction)

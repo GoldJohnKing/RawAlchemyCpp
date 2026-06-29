@@ -92,6 +92,9 @@ struct DecodeParams {
     std::string nnQnnContextBinaryDir;   // Android only
     std::string nnDirectmlDllPath;       // Windows only
     std::string nnSocModel;  // Android only: QNN "soc_model" numeric string (e.g. "69" for SM8750). "0" = auto-detect.
+    std::string nnHtpArch;   // Android only: QNN "htp_arch" ("73"/"75"/...). Empty = infer.
+    std::string nnCtxDir;    // Android only: app data dir for QNN context cache. Empty = no cache.
+    std::string nnAppVersion;  // Android only: app version (cache key component).
 };
 
 /**

@@ -44,6 +44,9 @@ struct NnSessionConfig {
     // Build.SOC_MODEL forwarded as QNN "soc_model" (helps graph-finalization).
     // "0" (unknown) is the ORT default and is safe.
     std::string socModel = "0";
+    std::string htpArch;     // "73"/"75"/... Empty = let QNN infer.
+    std::string ctxDir;      // app data dir for context cache. Empty = no caching.
+    std::string appVersion;  // cache key component.
 #endif
 };
 

@@ -33,6 +33,8 @@
 #include <onnxruntime_session_options_config_keys.h>  // kOrtSessionOptionsDisableCPUEPFallback
 
 #include <chrono>
+#include <cstdio>       // std::remove
+#include <sys/stat.h>   // ::stat
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -103,6 +105,20 @@ static void ensureQnnLibraryPaths() {
 }
 #endif
 
+// --- Runtime context-cache config (Android) ---
+// Bump kNnOptsFingerprint whenever a compile-affecting QNN EP option changes
+// (performance_mode / finalization_mode / vtcm / fp16 / shared_mem), so the
+// on-disk context cache invalidates and rebuilds instead of going stale.
+constexpr const char* kQnnRuntimeVersion = "2.42.0";
+constexpr const char* kOrtVersion = "1.24.1";
+constexpr const char* kNnOptsFingerprint = "sustained-m3-vtcm8-fp16";
+
+bool fileExists(const std::string& path) {
+    if (path.empty()) return false;
+    struct stat st {};
+    return ::stat(path.c_str(), &st) == 0;
+}
+
 // Builds SessionOptions with intra/inter thread pools pinned to 1 and the
 // platform EP registered. Throws Ort::Exception (caught by init()) on EP
 // registration failure.
@@ -167,20 +183,28 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
         static_cast<OrtSessionOptions*>(sopts), /*device_id=*/0));
 
     #elif defined(__ANDROID__)
-        // QNN HTP EP (Qualcomm NPU). socModel is forwarded from Build.SOC_MODEL.
-        // Record EP graph assignment so init() can verify QNN actually engaged
-        // (rejecting silent full-CPU fallback) while preserving mixed inference.
-        // Point cDSP FastRPC at the skel directory before QNN loads it (else
-        // HTP setup fails: "Failed to load skel, error: 4000" → INVALID_CONFIG).
+        // QNN HTP EP (Qualcomm NPU). socModel/htpArch forwarded from Build.SOC_MODEL.
         ensureQnnLibraryPaths();
         sopts.SetExecutionMode(ORT_SEQUENTIAL);
         sopts.DisableMemPattern();
         sopts.AddConfigEntry("session.record_ep_graph_assignment_info", "1");
         std::unordered_map<std::string, std::string> qnnOpts;
         qnnOpts.emplace("backend_path", "libQnnHtp.so");
-        qnnOpts.emplace("htp_performance_mode", "burst");
+        // sustained (not burst): batch photo processing is long-running; burst
+        // triggers thermal throttle/SSR and has a known ORT perf bug (#24417).
+        qnnOpts.emplace("htp_performance_mode", "sustained_high_performance");
         qnnOpts.emplace("enable_htp_fp16_precision", "1");
         qnnOpts.emplace("soc_model", cfg.socModel.empty() ? std::string{"0"} : cfg.socModel);
+        if (!cfg.htpArch.empty()) qnnOpts.emplace("htp_arch", cfg.htpArch);
+        // mode 3 = most aggressive graph finalization (compile-time-heavy, but
+        // with the runtime context cache the compile is paid once → near-free).
+        qnnOpts.emplace("htp_graph_finalization_optimization_mode", "3");
+        qnnOpts.emplace("vtcm_mb", "8");  // Hexagon v73 physical VTCM ceiling
+        // NOTE: enable_htp_shared_memory_allocator was removed — it triggers a
+        // FastRPC init→teardown→HANG on SM8550 / ORT 1.24.1 (the DMA-buf shared
+        // memory allocator path is incompatible here; the compile thread blocks
+        // indefinitely after fastrpc_apps_user_deinit). Re-enable only after
+        // isolated verification on this device.
         qnnOpts.emplace("device_id", "0");
         sopts.AppendExecutionProvider("QNN", qnnOpts);
 
@@ -226,6 +250,80 @@ void verifyQnnEngaged(const Ort::Session& session, const char* modelName) {
     }
 }
 
+#if defined(__ANDROID__)
+// Deterministic context-cache path. Empty when caching is disabled (no ctx dir
+// or app version). Filename embeds every version dimension so any change — app
+// update, QNN/ORT lib bump, SoC arch, compile opts — forces a rebuild.
+std::string buildCtxPath(const NnSessionConfig& cfg, const std::string& modelTag) {
+    if (cfg.ctxDir.empty() || cfg.appVersion.empty()) return {};
+    const std::string& arch = cfg.htpArch.empty() ? std::string{"0"} : cfg.htpArch;
+    return cfg.ctxDir + "/" + modelTag +
+           "_v" + cfg.appVersion +
+           "_qnn" + kQnnRuntimeVersion +
+           "_ort" + kOrtVersion +
+           "_arch" + arch +
+           "_" + kNnOptsFingerprint +
+           ".ctx.onnx";
+}
+#endif
+
+// Loads a session either from a cached QNN context binary (fast: ~200ms) or by
+// compiling the original model with cache generation enabled (slow: once per
+// cache-key lifetime). A failed cached-load deletes the stale file and falls
+// back to recompilation (self-healing). When caching is disabled (non-Android
+// or missing ctx dir), behaves as a plain session constructor + (on Android)
+// NPU-engagement verify, exactly like the previous behavior.
+std::unique_ptr<Ort::Session> createSessionWithCache(
+    Ort::Env& env, const std::string& modelPath, const std::string& modelTag,
+    const NnSessionConfig& cfg) {
+
+#if defined(__ANDROID__)
+    const std::string ctxPath = buildCtxPath(cfg, modelTag);
+
+    // Fast path: existing cache → load it. Same base SessionOptions (QNN EP
+    // registered) but NO ep.context_enable — we consume, not generate.
+    if (!ctxPath.empty() && fileExists(ctxPath)) {
+        try {
+            Ort::SessionOptions opts = makeSessionOptions(cfg);
+            auto session = std::make_unique<Ort::Session>(env, ctxPath.c_str(), opts);
+            nnlog::info("[NN] %s context loaded from cache: %s", modelTag.c_str(), ctxPath.c_str());
+            return session;  // cached context is QNN by construction
+        } catch (const std::exception& e) {
+            nnlog::info("[NN] %s cache load failed (%s); regenerating",
+                        modelTag.c_str(), e.what());
+            std::remove(ctxPath.c_str());  // corrupt/stale → self-heal
+            // fall through to compile path
+        }
+    }
+#endif
+
+    // Compile path.
+    Ort::SessionOptions opts = makeSessionOptions(cfg);
+#if defined(__ANDROID__)
+    if (!ctxPath.empty()) {
+        // Generate the cache while compiling. embed_mode=1 → single .ctx.onnx
+        // file (no separate .bin to manage); fine for these small models.
+        opts.AddConfigEntry("ep.context_embed_mode", "1");
+        opts.AddConfigEntry("ep.context_enable", "1");
+        opts.AddConfigEntry("ep.context_file_path", ctxPath.c_str());
+        nnlog::info("[NN] %s compiling + caching context → %s",
+                    modelTag.c_str(), ctxPath.c_str());
+    }
+#endif
+    std::unique_ptr<Ort::Session> session;
+#ifdef _WIN32
+    // ORTCHAR_T is wchar_t on Windows: widen the UTF-8 model path.
+    std::wstring wide = utf8_to_wide(modelPath);
+    session = std::make_unique<Ort::Session>(env, wide.c_str(), opts);
+#else
+    session = std::make_unique<Ort::Session>(env, modelPath.c_str(), opts);
+#endif
+#if defined(__ANDROID__)
+    verifyQnnEngaged(*session, modelTag.c_str());
+#endif
+    return session;
+}
+
 }  // namespace
 
 // --- PIMPL: the ORT-typed members live here, invisible to nn_session.h users. ---
@@ -256,35 +354,20 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
         // One shared Env for all sessions. Threading mode is ORT default (multi).
         impl_->env = Ort::Env{ORT_LOGGING_LEVEL_WARNING, "rawalchemy-nn-demosaic"};
 
-        Ort::SessionOptions sopts = makeSessionOptions(cfg);
-
-        // ORTCHAR_T is wchar_t on Windows, char elsewhere. Model paths are stored
-        // as UTF-8 and widened here for the Windows Session constructor.
-#ifdef _WIN32
+        // Each session is built via createSessionWithCache: on Android it serves
+        // the cached QNN context (fast) or compiles+caches (slow once); the cache
+        // path skips EP verification (cached context is QNN by construction), the
+        // compile path verifies inside. On Windows/Linux this is a plain ctor.
         if (!cfg.bayerModelPath.empty()) {
-            std::wstring wide = utf8_to_wide(cfg.bayerModelPath);
-            impl_->bayerSession = std::make_unique<Ort::Session>(impl_->env, wide.c_str(), sopts);
+            impl_->bayerSession = createSessionWithCache(impl_->env, cfg.bayerModelPath, "bayer", cfg);
         }
         if (!cfg.xtransModelPath.empty()) {
-            std::wstring wide = utf8_to_wide(cfg.xtransModelPath);
-            impl_->xtransSession = std::make_unique<Ort::Session>(impl_->env, wide.c_str(), sopts);
+            impl_->xtransSession = createSessionWithCache(impl_->env, cfg.xtransModelPath, "xtrans", cfg);
         }
-#else
-        if (!cfg.bayerModelPath.empty()) {
-            impl_->bayerSession = std::make_unique<Ort::Session>(impl_->env, cfg.bayerModelPath.c_str(), sopts);
-        }
-        if (!cfg.xtransModelPath.empty()) {
-            impl_->xtransSession = std::make_unique<Ort::Session>(impl_->env, cfg.xtransModelPath.c_str(), sopts);
-        }
-#endif
 
         auto t1 = std::chrono::high_resolution_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
         nnlog::info("[NN] session init took %lld ms", static_cast<long long>(ms));
-
-        // Verify NPU engagement (full-CPU fallback disabled for verification phase).
-        if (impl_->bayerSession) verifyQnnEngaged(*impl_->bayerSession, "bayer");
-        if (impl_->xtransSession) verifyQnnEngaged(*impl_->xtransSession, "xtrans");
     } catch (const Ort::Exception& e) {
         // Propagate the ORT error message (don't swallow to stderr — invisible on Android)
         impl_->env = Ort::Env{};
