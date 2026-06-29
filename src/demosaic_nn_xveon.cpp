@@ -22,12 +22,14 @@
 
 #include "demosaic_nn_xveon.h"
 
+#include "nn_logging.h"
 #include "nn_nan_guard.h"
 #include "nn_postprocess.h"
 #include "nn_preprocess.h"
 #include "nn_session.h"
 
 #include <onnxruntime_cxx_api.h>  // Ort::Session, Ort::Value, Ort::Run
+#include <chrono>
 #include <cstring>
 
 #include <algorithm>
@@ -161,6 +163,10 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     // --- Step 6: OpenMP-parallel tile loop ---
     // Thread-local tile buffers are hoisted out of the loop body so each worker
     // allocates them once, not per tile. ORT's Session::Run is thread-safe.
+    // Per-tile inference time is accumulated atomically across workers for
+    // diagnostic logging; correctness does not depend on the exact totals.
+    std::atomic<long long> totalInferenceMs{0};
+    std::atomic<size_t> tileCount{0};
 #ifdef RA_USE_OPENMP
     #pragma omp parallel
 #endif
@@ -200,6 +206,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
                     inShape.data(), inShape.size());
 
                 std::vector<Ort::Value> outputs;
+                auto _t0 = std::chrono::high_resolution_clock::now();
                 try {
                     outputs = ort->Run(Ort::RunOptions{nullptr},
                                        inNames, &inTensor, 1, outNames, 1);
@@ -210,6 +217,11 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
                     inferenceFailed.store(true, std::memory_order_relaxed);
                     continue;
                 }
+                auto _t1 = std::chrono::high_resolution_clock::now();
+                totalInferenceMs.fetch_add(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(_t1 - _t0).count(),
+                    std::memory_order_relaxed);
+                tileCount.fetch_add(1, std::memory_order_relaxed);
 
                 const float* outData = outputs[0].GetTensorData<float>();
                 // NaN guard MUST run with -ffast-math disabled on the guard TU.
@@ -286,6 +298,9 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
 
     out.width = W;
     out.height = H;
+
+    nnlog::info("[NN] demosaic: %zu tiles, total inference %lld ms",
+                tileCount.load(), totalInferenceMs.load());
     return NnDemosaicStatus::Ok;
 }
 

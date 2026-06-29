@@ -352,6 +352,7 @@ RA_API RaResult RA_CALL raProcessFile(
         // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
         // app-local DirectML.dll (defense-in-depth on top of the host preload).
         if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
+        if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
 
         // Metadata (for lens correction)
@@ -434,6 +435,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
         // app-local DirectML.dll (defense-in-depth on top of the host preload).
         if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
+        if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
@@ -519,6 +521,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
         // app-local DirectML.dll (defense-in-depth on top of the host preload).
         if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
+        if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
 
         // Metadata (for lens correction)

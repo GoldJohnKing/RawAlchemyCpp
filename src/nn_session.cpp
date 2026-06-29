@@ -27,15 +27,25 @@
 
 #include "nn_session.h"
 
+#include "nn_logging.h"
+
 #include <onnxruntime_cxx_api.h>  // Ort::Env, Ort::Session, Ort::SessionOptions
 #include <onnxruntime_session_options_config_keys.h>  // kOrtSessionOptionsDisableCPUEPFallback
 
+#include <chrono>
 #include <stdexcept>
+#include <string>
+#include <unordered_map>
 
 #ifdef _WIN32
 #include "win_unicode.h"  // utf8_to_wide
 
 #include <windows.h>  // SetDllDirectoryA, GetFullPathNameA
+#endif
+
+#if defined(__ANDROID__)
+#include <cstdlib>   // setenv, getenv
+#include <dlfcn.h>   // dladdr
 #endif
 
 namespace rawalchemy {
@@ -61,6 +71,36 @@ struct OrtDmlApi {
     OrtStatus* (*SessionOptionsAppendExecutionProvider_DML)(
         OrtSessionOptions* options, int device_id);
 };
+#endif
+
+#if defined(__ANDROID__)
+// Point the cDSP FastRPC loader at the app's nativeLibraryDir so it can load
+// the HTP skel (libQnnHtpVxxSkel.so). MainActivity's System.loadLibrary() only
+// maps the skel into the CPU process; the DSP has its own filesystem view and
+// without ADSP_LIBRARY_PATH reports "Failed to load skel, error: 4000" →
+// QNN_DEVICE_ERROR_INVALID_CONFIG (ORT issue #21203). The skels ship in the same
+// jniLibs dir as libraw_alchemy_core.so, so we derive that dir from our own .so
+// path via dladdr (robust to the randomized /data/app/~~hash/ install dir).
+static void ensureQnnLibraryPaths() {
+    Dl_info info{};
+    if (dladdr(reinterpret_cast<void*>(&ensureQnnLibraryPaths), &info) == 0 ||
+        info.dli_fname == nullptr) {
+        return;
+    }
+    std::string soPath(info.dli_fname);
+    const auto slash = soPath.find_last_of('/');
+    if (slash == std::string::npos) return;
+    soPath.resize(slash);  // dirname → arm64 jniLibs dir holding the skels
+    setenv("ADSP_LIBRARY_PATH", soPath.c_str(), /*overwrite=*/1);
+    // LD_LIBRARY_PATH: CPU-side libs are already loaded via System.loadLibrary,
+    // but prepend our dir so any QNN-internal dlopen of stub libs resolves too.
+    std::string ldp = soPath;
+    if (const char* existing = getenv("LD_LIBRARY_PATH"); existing && *existing) {
+        ldp += ":";
+        ldp += existing;
+    }
+    setenv("LD_LIBRARY_PATH", ldp.c_str(), /*overwrite=*/1);
+}
 #endif
 
 // Builds SessionOptions with intra/inter thread pools pinned to 1 and the
@@ -126,18 +166,23 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
     Ort::ThrowOnError(dmlApi->SessionOptionsAppendExecutionProvider_DML(
         static_cast<OrtSessionOptions*>(sopts), /*device_id=*/0));
 
-#elif defined(__ANDROID__)
-    // --- DIAGNOSTIC: CPU-only (temporarily disable QNN to test if fp16 is the issue) ---
-    sopts.SetExecutionMode(ORT_SEQUENTIAL);
-    sopts.DisableMemPattern();
-    // QNN EP temporarily disabled for A/B testing
-    // std::unordered_map<std::string, std::string> qnnOpts;
-    // qnnOpts.emplace("backend_path", "libQnnHtp.so");
-    // qnnOpts.emplace("htp_performance_mode", "burst");
-    // qnnOpts.emplace("enable_htp_fp16_precision", "1");
-    // qnnOpts.emplace("soc_model", cfg.socModel.empty() ? std::string{"0"} : cfg.socModel);
-    // qnnOpts.emplace("device_id", "0");
-    // sopts.AppendExecutionProvider("QNN", qnnOpts);
+    #elif defined(__ANDROID__)
+        // QNN HTP EP (Qualcomm NPU). socModel is forwarded from Build.SOC_MODEL.
+        // Record EP graph assignment so init() can verify QNN actually engaged
+        // (rejecting silent full-CPU fallback) while preserving mixed inference.
+        // Point cDSP FastRPC at the skel directory before QNN loads it (else
+        // HTP setup fails: "Failed to load skel, error: 4000" → INVALID_CONFIG).
+        ensureQnnLibraryPaths();
+        sopts.SetExecutionMode(ORT_SEQUENTIAL);
+        sopts.DisableMemPattern();
+        sopts.AddConfigEntry("session.record_ep_graph_assignment_info", "1");
+        std::unordered_map<std::string, std::string> qnnOpts;
+        qnnOpts.emplace("backend_path", "libQnnHtp.so");
+        qnnOpts.emplace("htp_performance_mode", "burst");
+        qnnOpts.emplace("enable_htp_fp16_precision", "1");
+        qnnOpts.emplace("soc_model", cfg.socModel.empty() ? std::string{"0"} : cfg.socModel);
+        qnnOpts.emplace("device_id", "0");
+        sopts.AppendExecutionProvider("QNN", qnnOpts);
 
 #else
     // --- Linux dev-loop: CPU EP ---
@@ -146,6 +191,39 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
 #endif
 
     return sopts;
+}
+
+// Verifies QNN EP actually engaged for this session. Throws if QNN took 0 nodes
+// (i.e. silent full-CPU fallback). Deliberately preserves mixed inference (some
+// ops still on CPU): only a complete QNN miss is rejected. Requires
+// session.record_ep_graph_assignment_info="1" set in makeSessionOptions.
+void verifyQnnEngaged(const Ort::Session& session, const char* modelName) {
+    auto info = session.GetEpGraphAssignmentInfo();
+    if (info.empty()) {
+        // Recording produced nothing — cannot verify. Warn but don't fail
+        // (guards against unexpected ORT behavior breaking all builds).
+        nnlog::info("[NN] %s: EP graph info empty (cannot verify QNN engagement)", modelName);
+        return;
+    }
+    size_t qnnNodes = 0, cpuNodes = 0;
+    for (const auto& sg : info) {
+        const std::string ep = sg.GetEpName();
+        const auto n = sg.GetNodes().size();
+        if (ep.find("QNN") != std::string::npos) {
+            qnnNodes += n;
+        } else if (ep.find("CPU") != std::string::npos) {
+            cpuNodes += n;
+        }
+    }
+    nnlog::info("[NN] %s placement: QNN nodes=%zu, CPU nodes=%zu (%s)",
+                modelName, qnnNodes, cpuNodes,
+                qnnNodes > 0 ? "NPU engaged" : "NPU NOT engaged");
+    if (qnnNodes == 0) {
+        throw std::runtime_error(
+            std::string("[NN] ") + modelName +
+            ": NPU not engaged — QNN EP took 0 nodes (full-CPU fallback disabled "
+            "for verification). Check libQnnHtp*.so / libcdsprpc.so presence and model ops.");
+    }
 }
 
 }  // namespace
@@ -174,6 +252,7 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
     }
 
     try {
+        auto t0 = std::chrono::high_resolution_clock::now();
         // One shared Env for all sessions. Threading mode is ORT default (multi).
         impl_->env = Ort::Env{ORT_LOGGING_LEVEL_WARNING, "rawalchemy-nn-demosaic"};
 
@@ -198,6 +277,14 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
             impl_->xtransSession = std::make_unique<Ort::Session>(impl_->env, cfg.xtransModelPath.c_str(), sopts);
         }
 #endif
+
+        auto t1 = std::chrono::high_resolution_clock::now();
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+        nnlog::info("[NN] session init took %lld ms", static_cast<long long>(ms));
+
+        // Verify NPU engagement (full-CPU fallback disabled for verification phase).
+        if (impl_->bayerSession) verifyQnnEngaged(*impl_->bayerSession, "bayer");
+        if (impl_->xtransSession) verifyQnnEngaged(*impl_->xtransSession, "xtrans");
     } catch (const Ort::Exception& e) {
         // Propagate the ORT error message (don't swallow to stderr — invisible on Android)
         impl_->env = Ort::Env{};

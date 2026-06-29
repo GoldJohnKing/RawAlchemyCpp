@@ -285,10 +285,7 @@ static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
 #ifdef _WIN32
         cfg.directmlDllPath = params.nnDirectmlDllPath;
 #elif defined(__ANDROID__)
-        // DecodeParams.nnQnnContextBinaryDir (Task 2) has no matching field on
-        // Plan A's NnSessionConfig — the session takes socModel (an SoC string),
-        // not a context-binary directory. Left at default "0"; reconcile in a
-        // follow-up (the NN path is unreachable until models are wired, Task 8).
+        cfg.socModel = params.nnSocModel.empty() ? std::string{"0"} : params.nnSocModel;
 #endif
         if (!sess.init(cfg)) {
             throw std::runtime_error("[NN] session init failed");

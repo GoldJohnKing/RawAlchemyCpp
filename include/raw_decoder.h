@@ -91,6 +91,7 @@ struct DecodeParams {
     std::string nnXtransModelPath;
     std::string nnQnnContextBinaryDir;   // Android only
     std::string nnDirectmlDllPath;       // Windows only
+    std::string nnSocModel;  // Android only: QNN "soc_model" numeric string (e.g. "69" for SM8750). "0" = auto-detect.
 };
 
 /**
