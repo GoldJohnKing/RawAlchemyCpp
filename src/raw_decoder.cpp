@@ -251,10 +251,45 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
             in.xyzToCam[i * 3 + j] = static_cast<float>(color.cam_xyz[i][j]);
 }
 
-/// Decode via the x-veon NN demosaic. Returns linear ProPhoto RGB [0,1].
-/// Throws std::runtime_error on any failure (caller surfaces via RaResult).
-static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
-                                const DecodeParams& params) {
+    // Rotate an RGB ImageBuffer to display orientation, mirroring LibRaw's
+    // flip_index() (file_write.cpp:22-31): bit 2 = transpose, bit 1 = vertical
+    // mirror, bit 0 = horizontal mirror. The classical decode path gets this
+    // inside dcraw_process/copy_mem_image; the NN path returns before that step,
+    // so it must rotate explicitly to keep the downstream EXIF Orientation=1
+    // (rotation baked into pixels) convention valid for portrait images.
+    static ImageBuffer applyOrientationFlip(ImageBuffer src, int flip) {
+        if (flip == 0) return src;
+
+        const int W = src.width;
+        const int H = src.height;
+        const bool transpose = (flip & 4) != 0;
+        const int outW = transpose ? H : W;
+        const int outH = transpose ? W : H;
+
+        ImageBuffer out(outW, outH, 3);
+        const float* s = src.ptr();
+        float* d = out.ptr();
+
+        for (int orow = 0; orow < outH; ++orow) {
+            for (int ocol = 0; ocol < outW; ++ocol) {
+                int r = orow, c = ocol;
+                if (flip & 4) std::swap(r, c);
+                if (flip & 2) r = H - 1 - r;
+                if (flip & 1) c = W - 1 - c;
+                const size_t srcIdx = (static_cast<size_t>(r) * W + c) * 3;
+                const size_t dstIdx = (static_cast<size_t>(orow) * outW + ocol) * 3;
+                d[dstIdx + 0] = s[srcIdx + 0];
+                d[dstIdx + 1] = s[srcIdx + 1];
+                d[dstIdx + 2] = s[srcIdx + 2];
+            }
+        }
+        return out;
+    }
+
+    /// Decode via the x-veon NN demosaic. Returns linear ProPhoto RGB [0,1].
+    /// Throws std::runtime_error on any failure (caller surfaces via RaResult).
+    static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
+                                    const DecodeParams& params) {
     // raw2image_ex(1): copy CFA into imgdata.image[] AND subtract the real
     // per-channel black (runs adjust_bl() first, then subtracts cblack during
     // the copy — see LibRaw raw2image.cpp:427-432). This MUST match the
@@ -360,6 +395,11 @@ static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
     };
     camRgbToProPhotoLinear(result.ptr(), out.rgbInterleaved.data(),
                            result.pixelCount(), camToProPhoto);
+
+    // Rotate to display orientation: the NN path bypasses LibRaw's flip
+    // (normally applied during dcraw_process), so without this any non-landscape
+    // shot (flip != 0) would ship sensor-native pixels under EXIF Orientation=1.
+    result = applyOrientationFlip(std::move(result), img.sizes.flip);
 
     return result;
 }
