@@ -464,6 +464,7 @@ set(RA_LIBRARY_SOURCES
     src/win_unicode.cpp
     src/nn_nan_guard.cpp
     src/nn_preprocess.cpp
+    src/nn_highlight_recon.cpp
     src/nn_postprocess.cpp
     src/nn_session.cpp
     src/demosaic_nn_xveon.cpp
@@ -679,16 +680,21 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
 endif()
 
 # nn_nan_guard.cpp MUST NOT use -ffast-math (would delete isnan/isinf guards).
-# Applied per-file because the whole raw_alchemy_core target uses -ffast-math
-# above; this override restores strict FP for just the guard TU.
+# nn_highlight_recon.cpp is also excluded: its step-C chrominance reduction must stay
+# deterministic (reduction-order drift under -fassociative-math would make
+# cross_validate_demosaic.py outputs non-reproducible across debug/release builds),
+# and -freciprocal-math would drift its guarded divisions vs the darktable reference.
+# Both applied per-file because the whole raw_alchemy_core target uses -ffast-math
+# above; these overrides restore strict FP for just these TUs.
 # clang-cl (Windows) requires the /clang: forwarding prefix, same as RA_CORE_FASTMATH
 # above (see comment at line 625-628): bare -fno-fast-math is silently ignored.
+set(_RA_STRICT_FP_TUS src/nn_nan_guard.cpp src/nn_highlight_recon.cpp)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
+    set_source_files_properties(${_RA_STRICT_FP_TUS} PROPERTIES
         COMPILE_OPTIONS "/clang:-fno-fast-math"
     )
 else()
-    set_source_files_properties(src/nn_nan_guard.cpp PROPERTIES
+    set_source_files_properties(${_RA_STRICT_FP_TUS} PROPERTIES
         COMPILE_OPTIONS "-fno-fast-math"
     )
 endif()

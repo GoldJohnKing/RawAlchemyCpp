@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 #include "aligned_allocator.h"
 #include "cfa_lookup.h"
@@ -306,6 +307,59 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
         }
     }
 
+    /// Highlight desaturation in linear ProPhoto RGB — a broad Gaussian "shoulder"
+    /// (darktable filmic_desaturate style). As luma approaches 1.0, chroma is blended
+    /// toward neutral so highlights roll toward white instead of through pink/magenta,
+    /// softening the hard per-channel clip discontinuity at jpeg_writer.
+    ///
+    /// Why a Gaussian and not a threshold+ramp: the model leaves residual chroma in a
+    /// wide band at highlight EDGES (luma ~0.6-0.9), not just at the clip point. A hard
+    /// threshold (the previous 0.85 start) cleaned the bright CORE but left the edge
+    /// band untouched — and by neutralizing the core it made the surviving edge chroma
+    /// more visible as a pink rim. The Gaussian has no threshold and no derivative
+    /// kink, so it reaches the whole band smoothly with no visible transition line.
+    ///
+    /// This is the output-side complement to the input-side inpaint-opposed recon:
+    /// opposed can't help fully-clipped regions (all 3 CFA channels at sensor max → its
+    /// max() is a no-op), but this forces chroma→0 at high luma regardless. Together
+    /// they match darktable's opposed (input) + filmic (output) pairing.
+    ///
+    /// Runs in linear scene-referred space, pre-grading. The subsequent grading sat
+    /// boost (×1.25) partially re-saturates, but the Gaussian is broad enough that the
+    /// net effect still suppresses the fringe band.
+    static void desaturateHighlightsLinear(float* rgb, int width, int height) {
+        // Rec.709 luma weights — fine perceptual approximation in ProPhoto space; the
+        // exact weights matter little since we blend toward the computed luma itself.
+        constexpr float kLumaR = 0.2126f, kLumaG = 0.7152f, kLumaB = 0.0722f;
+        // sigma controls how far the desaturation reaches below luma=1. 0.3 gives:
+        //   luma 0.9 → ~95% desat, 0.8 → ~80%, 0.7 → ~61%, 0.5 → ~25%, 0.18 → ~2%.
+        // Broad enough to kill the highlight-edge fringe; raise to narrow (preserve
+        // more bright saturated color), lower to widen (more aggressive cleanup).
+        constexpr float kSigma = 0.3f;
+        constexpr float kInv2SigmaSq = 0.5f / (kSigma * kSigma);
+        const size_t n = static_cast<size_t>(width) * static_cast<size_t>(height) * 3;
+        for (size_t i = 0; i < n; i += 3) {
+            const float r = rgb[i];
+            const float g = rgb[i + 1];
+            const float b = rgb[i + 2];
+            const float luma = kLumaR * r + kLumaG * g + kLumaB * b;
+            const float radius = 1.0f - luma;  // 0 at the shoulder, grows as luma drops
+            if (radius <= 0.0f) {
+                // At/above the shoulder (luma≥1): full desaturation toward neutral.
+                rgb[i]     = luma;
+                rgb[i + 1] = luma;
+                rgb[i + 2] = luma;
+                continue;
+            }
+            // keep = chroma retention. Gaussian: 0 at luma=1 (full desat), rising to ~1
+            // in midtones. C∞ smooth — no threshold, no kink, no transition line.
+            const float keep = 1.0f - std::exp(-radius * radius * kInv2SigmaSq);
+            rgb[i]     = luma + (r - luma) * keep;
+            rgb[i + 1] = luma + (g - luma) * keep;
+            rgb[i + 2] = luma + (b - luma) * keep;
+        }
+    }
+
     /// Decode via the x-veon NN demosaic. Returns linear ProPhoto RGB [0,1].
     /// Throws std::runtime_error on any failure (caller surfaces via RaResult).
     static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
@@ -426,6 +480,12 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
                          out.outAccum.data(), out.weightAccum.data(),
                          out.paddedW, out.phaseDx, out.phaseDy,
                          w, h, flip, camToProPhoto);
+
+    // Output-side highlight desaturation (linear ProPhoto). Complements the input-side
+    // inpaint-opposed recon: opposed can't fix fully-clipped regions, but this forces
+    // chroma→0 as luma→1 regardless, removing the residual pink and softening the hard
+    // clip edge. See desaturateHighlightsLinear for the rationale.
+    desaturateHighlightsLinear(result.ptr(), outW, outH);
 
     return result;
 }

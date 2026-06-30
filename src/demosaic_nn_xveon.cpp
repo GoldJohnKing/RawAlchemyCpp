@@ -4,21 +4,23 @@
 // Pipeline (design docs/nn-demosaic-design.md §2.3-§2.4):
 //   1. param validation + session readiness
 //   2. normalize CFA in place (working copy): (raw - black) / (white - black)
-//   3. per-site white balance on the working copy
-//   4. mirror-pad top/left by (dy,dx) to phase-align to the canonical pattern,
+//   3. inpaint-opposed highlight reconstruction (reconstruct clipped sensels from
+//      opposing-channel means, BEFORE white balance — see nn_highlight_recon.cpp)
+//   4. per-site white balance on the working copy
+//   5. mirror-pad top/left by (dy,dx) to phase-align to the canonical pattern,
 //      and right/bottom so an integer tile grid covers the whole image
-//   5. build canonical masks + trapezoid blend window (tile-invariant)
-//   6. OpenMP-parallel tile loop: pack [1,4,288,288] input -> ORT Run ->
+//   6. build canonical masks + trapezoid blend window (tile-invariant)
+//   7. OpenMP-parallel tile loop: pack [1,4,288,288] input -> ORT Run ->
 //      NaN guard -> trapezoid-weighted accumulate into RGB/weight buffers
-//   7. hand off the accumulated buffers + geometry (caller finalizes: crop +
+//   8. hand off the accumulated buffers + geometry (caller finalizes: crop +
 //      weight-normalize + color matrix + orientation flip)
 //
-// Deviation from the design: the design lists a highlight-reconstruction step
-// (inpaint-opposed, §2.3 step 4) before WB. No highlight-recon primitive was
-// produced by Tasks 3-4 and none is consumed here. x-veon's bounded residual
-// activation makes this safe for non-clipped inputs; clipped highlights will
-// show the usual magenta cast until a future task adds the recon primitive.
-// Flagged in the Task 7 report.
+// Highlight reconstruction (step 3) implements design §2.3 step 4 (inpaint-opposed,
+// ported from darktable). Earlier revisions shipped without it and clipped highlights
+// showed a magenta cast — the model was trained on non-clipped [0,1] data and
+// hallucinated chromaticity into saturated regions after per-channel WB amplification.
+// See nn_highlight_recon.cpp for the algorithm and the deliberate deviations from
+// the darktable reference.
 
 #include "demosaic_nn_xveon.h"
 
@@ -26,6 +28,7 @@
 #include "nn_nan_guard.h"
 #include "nn_postprocess.h"
 #include "nn_preprocess.h"
+#include "nn_highlight_recon.h"
 #include "nn_session.h"
 
 #include <onnxruntime_cxx_api.h>  // Ort::Session, Ort::Value, Ort::Run
@@ -99,27 +102,39 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     const int W = in.width;
     const int H = in.height;
 
-    // --- Steps 2+3 fused: working copy + normalize + per-site white balance ---
-    // One pass replaces the previous separate copy + normalize + WB steps.
-    // Normalization (raw - black) / (white - black) composes with the per-site
-    // WB multiplier, so each output site is computed straight from the caller's
-    // CFA. range<=0 zeroes all sites (degenerate-range guard).
+    // --- Step 2: normalize CFA into the working copy: (raw - black) / (white - black)
+    // Highlight recon (step 3) and per-site WB (step 4) run as separate passes: recon
+    // must see the normalized-but-un-WB'd CFA so clipped sensels aren't amplified by
+    // per-channel WB before reconstruction. range<=0 zeroes all sites (degenerate guard).
     const float black = in.blackLevel;
     const float range = in.whiteLevel - in.blackLevel;
     const float invRange = (range > 0.0f) ? (1.0f / range) : 0.0f;
     std::vector<float> workingCfa(static_cast<size_t>(W) * static_cast<size_t>(H));
+    const size_t cfaPix = static_cast<size_t>(W) * static_cast<size_t>(H);
+    for (size_t i = 0; i < cfaPix; ++i) {
+        workingCfa[i] = (in.cfaMosaic[i] - black) * invRange;
+    }
+
+    // --- Step 3: inpaint-opposed highlight reconstruction (design §2.3 step 4) ---
+    // Reconstructs clipped sensels from opposing-channel neighborhood means in linear
+    // sensor space, BEFORE white balance. Without this, fully-clipped sensels become
+    // (wb_R, 1, wb_B) after per-channel WB — an out-of-distribution magenta input the
+    // model handles poorly (it was trained on non-clipped data). No-op for well-exposed
+    // images (early-exit on !anyClipped inside).
+    reconstructHighlightsOpposed(workingCfa.data(), W, H, phase, kNnHighlightClipFactor);
+
+    // --- Step 4: per-site white balance ---
+    // After phase-align mirror-pad by (dy,dx), original pixel (y,x) lands at canonical
+    // position (y+dy, x+dx), so its WB channel is the canonical color at that position.
     for (int y = 0; y < H; ++y) {
+        const size_t rowBase = static_cast<size_t>(y) * W;
         for (int x = 0; x < W; ++x) {
-            // After phase-align mirror-pad by (dy,dx), original pixel (y,x)
-            // lands at canonical position (y+dy, x+dx), so its WB channel is
-            // the canonical color at that position.
             const int ch = canonicalCfaColor(y + phase.dy, x + phase.dx, phase);
-            const size_t i = static_cast<size_t>(y) * W + x;
-            workingCfa[i] = (in.cfaMosaic[i] - black) * invRange * in.wbRgb[ch];
+            workingCfa[rowBase + x] *= in.wbRgb[ch];
         }
     }
 
-    // --- Step 4: mirror-pad to phase-aligned origin + integer tile grid ---
+    // --- Step 5: mirror-pad to phase-aligned origin + integer tile grid ---
     const int alignedH = H + phase.dy;  // after top mirror-pad
     const int alignedW = W + phase.dx;  // after left mirror-pad
     const int ny = tileCount(alignedH);
@@ -137,7 +152,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         }
     }
 
-    // --- Step 5: canonical masks + blend window (both tile-invariant) ---
+    // --- Step 6: canonical masks + blend window (both tile-invariant) ---
     constexpr int NPS = NN_PATCH_SIZE;
     constexpr int TILE_PIX = NPS * NPS;
     std::vector<float> maskR(TILE_PIX), maskG(TILE_PIX), maskB(TILE_PIX);
@@ -164,7 +179,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     std::atomic<bool> nanDetected{false};
     std::atomic<bool> inferenceFailed{false};
 
-    // --- Step 6: OpenMP-parallel tile loop ---
+    // --- Step 7: OpenMP-parallel tile loop ---
     // Thread-local tile buffers are hoisted out of the loop body so each worker
     // allocates them once, not per tile. ORT's Session::Run is thread-safe.
     // Per-tile inference time is accumulated atomically across workers for
@@ -277,7 +292,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         return NnDemosaicStatus::InferenceFailed;
     }
 
-    // --- Step 7: hand off the accumulated buffers + geometry ---
+    // --- Step 8: hand off the accumulated buffers + geometry ---
     // Finalize (crop + weight-normalize + color matrix + orientation) is done by
     // the caller, fused into a single pass so no full-image camRGB intermediate
     // is materialized. See NnDemosaicOutput for the recovery formula.
