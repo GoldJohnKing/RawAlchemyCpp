@@ -481,10 +481,11 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
                          out.paddedW, out.phaseDx, out.phaseDy,
                          w, h, flip, camToProPhoto);
 
-    // Output-side highlight desaturation — TEMPORARILY DISABLED for A/B testing.
-    // The CFA-side recon (opposed + segbased) may suffice on its own; re-enable if
-    // the model's >1.0 output still produces a pink cast at the JPEG clamp.
-    // desaturateHighlightsLinear(result.ptr(), outW, outH);
+    // Output-side highlight desaturation (linear ProPhoto). Complements the CFA-side
+    // recon: opposed/segbased fix the model's input, but the model's output can still
+    // exceed [0,1] in bright regions — this forces chroma→0 as luma→1, removing any
+    // residual pink at the JPEG hard-clamp.
+    desaturateHighlightsLinear(result.ptr(), outW, outH);
 
     return result;
 }
