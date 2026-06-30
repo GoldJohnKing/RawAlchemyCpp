@@ -130,12 +130,19 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     // Per-channel clips scale with WB (clips[c] = clipFactor × wbRgb[c]). No-op for
     // well-exposed images (early-exit inside). Reconstructs before the NN model sees
     // the data, so the model never receives out-of-distribution clipped input.
+    //
+    // Snapshot before opposed: segbased reads threshold/refavg from the pre-opposed
+    // CFA (matching the x-veon reference), while opposed modifies workingCfa in place.
+    // Segbased's step g then overrides opposed where it finds a better candidate.
+    std::vector<float> cfaPreOpposed(workingCfa);
     reconstructHighlightsOpposed(workingCfa.data(), W, H, phase, kNnHighlightClipFactor, in.wbRgb);
 
-    // --- Step 4b: segmentation-based full-clip recovery (post-WB).
-    // Opposed is a no-op where all 3 channels are clipped; segbased recovers texture
-    // via gradient propagation. No-op when there aren't enough fully-clipped sensels.
-    reconstructHighlightsSegmentBased(workingCfa.data(), W, H, phase, kNnHighlightClipFactor, in.wbRgb);
+    // --- Step 4b: segmentation-based reconstruction (step g + step h, post-WB).
+    // Step g: candidate-based recon from the pre-opposed snapshot (overrides opposed
+    // where a good candidate exists). Step h: gradient recovery for fully-clipped
+    // regions. No-op when there aren't enough clipped sensels.
+    reconstructHighlightsSegmentBased(workingCfa.data(), cfaPreOpposed.data(),
+                                      W, H, phase, kNnHighlightClipFactor, in.wbRgb);
 
     // --- Step 5: mirror-pad to phase-aligned origin + integer tile grid ---
     const int alignedH = H + phase.dy;  // after top mirror-pad

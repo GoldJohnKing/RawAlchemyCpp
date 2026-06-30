@@ -14,12 +14,21 @@
 
 namespace rawalchemy {
 
-/** Recover texture in fully-clipped CFA regions via gradient propagation.
- *  In-place on `cfa` (WB-applied). No-op (returns false) when there aren't enough
- *  all-clipped sensels to bother. Only handles regions where ALL 3 channels are
- *  clipped — partial clips are left to inpaint-opposed. */
-bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
-                                       const CfaPhase& phase, float clipFactor,
-                                       const float wbRgb[3]);
+/** Reconstruct clipped CFA sensels via segmentation + candidate selection + gradient
+ *  propagation. Matches the x-veon reference: reads threshold/refavg/candidates from
+ *  `originalCfa` (the pre-opposed snapshot), writes results to `cfa`.
+ *
+ *  Step g (candidate-based) overrides opposed's reconstruction where a good candidate
+ *  exists; opposed's result survives in cfa where it doesn't. Step h adds gradient-
+ *  based texture recovery for fully-clipped regions.
+ *
+ *  @param cfa          [W*H] WB-applied, post-opposed. Modified in place (step g
+ *                      overrides + step h recovery add).
+ *  @param originalCfa  [W*H] read-only snapshot taken BEFORE opposed ran (post-WB).
+ *                      Used for all threshold/refavg/candidate math.
+ *  @returns false on early-exit (insufficient clipped sensels). */
+bool reconstructHighlightsSegmentBased(float* cfa, const float* originalCfa,
+                                       int W, int H, const CfaPhase& phase,
+                                       float clipFactor, const float wbRgb[3]);
 
 } // namespace rawalchemy
