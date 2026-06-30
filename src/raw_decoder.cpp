@@ -251,30 +251,57 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
             in.xyzToCam[i * 3 + j] = static_cast<float>(color.cam_xyz[i][j]);
 }
 
-    // Fused camRGB->ProPhoto conversion + orientation flip in a single pass, so
-    // the NN path needs no separate rotate buffer for portrait images. Mirrors
-    // LibRaw's flip_index() (file_write.cpp:22-31): bit 2 = transpose, bit 1 =
-    // vertical mirror, bit 0 = horizontal mirror. The color matrix is position-
-    // invariant, so convert-and-rearrange is bit-identical to convert-then-rotate.
-    // camRgb is sensor-native (srcW x srcH); dst is display-oriented (dstW x dstH).
-    static void convertCamRgbToProPhotoFlipped(float* dst, int dstW, int dstH,
-                                                const float* camRgb,
-                                                int srcW, int srcH,
-                                                int flip, const float outCam[9]) {
-        for (int orow = 0; orow < dstH; ++orow) {
-            for (int ocol = 0; ocol < dstW; ++ocol) {
-                int r = orow, c = ocol;
-                if (flip & 4) std::swap(r, c);
-                if (flip & 2) r = srcH - 1 - r;
-                if (flip & 1) c = srcW - 1 - c;
-                const size_t srcIdx = (static_cast<size_t>(r) * srcW + c) * 3;
-                const float cr = camRgb[srcIdx + 0];
-                const float cg = camRgb[srcIdx + 1];
-                const float cb = camRgb[srcIdx + 2];
-                const size_t dstIdx = (static_cast<size_t>(orow) * dstW + ocol) * 3;
-                dst[dstIdx + 0] = outCam[0] * cr + outCam[1] * cg + outCam[2] * cb;
-                dst[dstIdx + 1] = outCam[3] * cr + outCam[4] * cg + outCam[5] * cb;
-                dst[dstIdx + 2] = outCam[6] * cr + outCam[7] * cg + outCam[8] * cb;
+    // Fused finalize of the NN accumulated output: crop (pad offset) + normalize
+    // by blend weight + camRGB->ProPhoto matrix + orientation flip, all in one
+    // pass. Reads the NN's padded accumulators directly so no full-image camRGB
+    // intermediate is materialized. flip==0 (landscape) takes a branch-free
+    // sequential path; flip!=0 composes the crop offset with LibRaw's flip_index
+    // (file_write.cpp:22-31) for the source read. The color matrix is position-
+    // invariant, so finalize-and-rearrange is bit-identical to the old
+    // crop -> normalize -> convert -> rotate chain.
+    static void finalizeNnToProPhoto(float* dst, int dstW, int dstH,
+                                     const float* outAccum,
+                                     const float* weightAccum,
+                                     int paddedW, int phaseDx, int phaseDy,
+                                     int srcW, int srcH,
+                                     int flip, const float outCam[9]) {
+        if (flip == 0) {
+            for (int y = 0; y < srcH; ++y) {
+                const size_t padRow =
+                    static_cast<size_t>(y + phaseDy) * paddedW + phaseDx;
+                float* drow = dst + static_cast<size_t>(y) * srcW * 3;
+                for (int x = 0; x < srcW; ++x) {
+                    const size_t pIdx = padRow + x;
+                    const float w = weightAccum[pIdx];
+                    const float invW = (w > 0.0f) ? (1.0f / w) : 0.0f;
+                    const float cr = outAccum[pIdx * 3 + 0] * invW;
+                    const float cg = outAccum[pIdx * 3 + 1] * invW;
+                    const float cb = outAccum[pIdx * 3 + 2] * invW;
+                    const size_t d = static_cast<size_t>(x) * 3;
+                    drow[d + 0] = outCam[0] * cr + outCam[1] * cg + outCam[2] * cb;
+                    drow[d + 1] = outCam[3] * cr + outCam[4] * cg + outCam[5] * cb;
+                    drow[d + 2] = outCam[6] * cr + outCam[7] * cg + outCam[8] * cb;
+                }
+            }
+        } else {
+            for (int orow = 0; orow < dstH; ++orow) {
+                for (int ocol = 0; ocol < dstW; ++ocol) {
+                    int r = orow, c = ocol;
+                    if (flip & 4) std::swap(r, c);
+                    if (flip & 2) r = srcH - 1 - r;
+                    if (flip & 1) c = srcW - 1 - c;
+                    const size_t pIdx =
+                        static_cast<size_t>(r + phaseDy) * paddedW + (c + phaseDx);
+                    const float w = weightAccum[pIdx];
+                    const float invW = (w > 0.0f) ? (1.0f / w) : 0.0f;
+                    const float cr = outAccum[pIdx * 3 + 0] * invW;
+                    const float cg = outAccum[pIdx * 3 + 1] * invW;
+                    const float cb = outAccum[pIdx * 3 + 2] * invW;
+                    const size_t d = (static_cast<size_t>(orow) * dstW + ocol) * 3;
+                    dst[d + 0] = outCam[0] * cr + outCam[1] * cg + outCam[2] * cb;
+                    dst[d + 1] = outCam[3] * cr + outCam[4] * cg + outCam[5] * cb;
+                    dst[d + 2] = outCam[6] * cr + outCam[7] * cg + outCam[8] * cb;
+                }
             }
         }
     }
@@ -323,10 +350,10 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
         }
     }
 
-    // extractCfa divides by whiteLevel, landing the CFA in [0,1]. The NN's own
-    // normalizeCfaInPlace expects (raw-black)/(white-black); since the CFA is
+    // extractCfa divides by whiteLevel, landing the CFA in [0,1]. nnDemosaic's
+    // fused prep loop applies (raw-black)/(white-black) * WB; since the CFA is
     // already normalized and raw2image subtracted black, we pass blackLevel=0
-    // and whiteLevel=1 so the NN normalize step is an identity (no double scale).
+    // and whiteLevel=1 so the normalize factor is identity (no double scale).
     const float rawMax = static_cast<float>(img.color.maximum);
     if (!(rawMax > 0.0f)) {
         throw std::runtime_error("[NN] imgdata.color.maximum is zero/invalid");
@@ -364,16 +391,17 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
         throw std::runtime_error(std::string("[NN] demosaic failed: ") + reason);
     }
 
-    // out.rgbInterleaved is [w*h*3] linear white-balanced camRGB (nnDemosaic
-    // always outputs camRGB — outputCamRgb was removed in Plan A). Convert to
+    // nnDemosaic now hands off its padded accumulators + geometry (no camRGB
+    // intermediate). Finalize straight from them below: crop + weight-normalize
+    // + camRGB->ProPhoto + orientation flip in one pass. nnDemosaic always
+    // accumulates camRGB (outputCamRgb was removed in Plan A); we convert to
     // linear ProPhoto via LibRaw's rgb_cam (out_cam = prophoto_rgb · rgb_cam,
-    // the same matrix the classical output_color=4 path uses) so we are
+    // the same matrix the classical output_color=4 path uses) so we stay
     // bit-identical into vLog/LUT.
 
     // Allocate at display dimensions: the NN path bypasses LibRaw's flip (applied
-    // in dcraw_process), so the orientation is folded into the camRGB->ProPhoto
-    // conversion below — one pass, no separate rotate buffer. flip==0 (landscape)
-    // stays on the zero-overhead sequential conversion path.
+    // in dcraw_process), so the orientation is folded into the finalize pass
+    // below. flip==0 (landscape) takes a branch-free sequential read path.
     const int flip = img.sizes.flip;
     const bool transpose = (flip & 4) != 0;
     const int outW = transpose ? h : w;
@@ -394,14 +422,10 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
         outCam[1][0], outCam[1][1], outCam[1][2],
         outCam[2][0], outCam[2][1], outCam[2][2]
     };
-    if (flip == 0) {
-        camRgbToProPhotoLinear(result.ptr(), out.rgbInterleaved.data(),
-                               result.pixelCount(), camToProPhoto);
-    } else {
-        convertCamRgbToProPhotoFlipped(result.ptr(), outW, outH,
-                                        out.rgbInterleaved.data(), w, h,
-                                        flip, camToProPhoto);
-    }
+    finalizeNnToProPhoto(result.ptr(), outW, outH,
+                         out.outAccum.data(), out.weightAccum.data(),
+                         out.paddedW, out.phaseDx, out.phaseDy,
+                         w, h, flip, camToProPhoto);
 
     return result;
 }

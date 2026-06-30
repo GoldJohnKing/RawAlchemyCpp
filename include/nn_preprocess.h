@@ -26,12 +26,6 @@ struct CfaPhase {
  *  period=6, dy=dx=0 (LibRaw delivers canonically-aligned X-Trans). */
 CfaPhase detectCfaPhase(unsigned filters);
 
-/** In-place CFA normalization: out = (raw - black) / (white - black).
- *  Single black/white level for all sites (per x-veon training, NOT per-site).
- *  Values may exceed 1.0 for HDR highlights (no upper clamp).
- *  If `whiteLevel <= blackLevel`, the buffer is zeroed (avoids NaN/Inf propagation). */
-void normalizeCfaInPlace(float* cfa, size_t count, float blackLevel, float whiteLevel);
-
 /** Tile constants — fixed by the static ONNX export (design §2.5). */
 static constexpr int NN_PATCH_SIZE = 288;
 static constexpr int NN_OVERLAP = 48;

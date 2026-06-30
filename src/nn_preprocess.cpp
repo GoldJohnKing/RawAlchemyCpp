@@ -24,19 +24,6 @@ CfaPhase detectCfaPhase(unsigned filters) {
     return p;
 }
 
-void normalizeCfaInPlace(float* cfa, size_t count, float blackLevel, float whiteLevel) {
-    const float range = whiteLevel - blackLevel;
-    if (range <= 0.0f) {
-        // Degenerate; zero the buffer to avoid div-by-zero.
-        for (size_t i = 0; i < count; ++i) cfa[i] = 0.0f;
-        return;
-    }
-    const float invRange = 1.0f / range;
-    for (size_t i = 0; i < count; ++i) {
-        cfa[i] = (cfa[i] - blackLevel) * invRange;
-    }
-}
-
 // Canonical X-Trans 6x6 pattern (Fujifilm standard). 0=R, 1=G, 2=B.
 static const int XTRANS_CANONICAL[6][6] = {
     {1, 2, 1, 1, 0, 1},

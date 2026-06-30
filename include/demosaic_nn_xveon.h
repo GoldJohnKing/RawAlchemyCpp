@@ -4,7 +4,8 @@
 // postprocessing (nn_postprocess) and the NaN guard (nn_nan_guard) into one
 // pipeline that runs on a CFA mosaic:
 //   normalize -> per-site WB -> phase-align/mirror-pad -> tile -> infer (ORT)
-//   -> trapezoid blend -> crop (raw camRGB output; caller applies color matrix).
+//   -> trapezoid blend -> hand off accumulators (caller crops, normalizes,
+//      applies color matrix + flip).
 // Algorithm: see docs/nn-demosaic-design.md §2.3-§2.4.
 //
 // ORT is PIMPL-isolated: this header does NOT include any ORT header. The
@@ -44,12 +45,22 @@ struct NnDemosaicInput {
     int xtransPattern[6][6] = {};
 };
 
-/** Output bundle for nnDemosaic(). `rgbInterleaved` is [width*height*3],
- *  linear white-balanced camRGB (camera-native RGB, pre-color-matrix). */
+/** Output bundle for nnDemosaic(). Holds the trapezoid-blended accumulation over
+ *  the PADDED extent plus the geometry needed to finalize it. nnDemosaic stops
+ *  here (no crop/normalize) so the caller can fuse crop + weight-normalize +
+ *  color matrix + orientation flip into one pass — no full-image camRGB
+ *  intermediate. To recover linear white-balanced camRGB for pixel (y,x):
+ *    pIdx = (y + phaseDy) * paddedW + (x + phaseDx)
+ *    invW = (weightAccum[pIdx] > 0) ? 1/weightAccum[pIdx] : 0
+ *    rgb  = outAccum[pIdx*3 .. pIdx*3+2] * invW   (camera-native, pre-matrix) */
 struct NnDemosaicOutput {
-    std::vector<float> rgbInterleaved;  // [width*height*3], linear white-balanced camRGB (camera-native RGB, pre-color-matrix)
-    int width = 0;
-    int height = 0;
+    std::vector<float> outAccum;     // [paddedH*paddedW*3], trapezoid-blended camRGB accumulation
+    std::vector<float> weightAccum;  // [paddedH*paddedW], blend-weight sum per padded pixel
+    int paddedW = 0;                 // padded width (>= width + phaseDx)
+    int width = 0;                   // sensor-native active width
+    int height = 0;                  // sensor-native active height
+    int phaseDx = 0;                 // left mirror-pad (pixel (y,x) is at padded (y+phaseDy, x+phaseDx))
+    int phaseDy = 0;                 // top mirror-pad
 };
 
 /** Outcome of nnDemosaic(). Design §6: two reliability mechanisms exist —
@@ -63,11 +74,14 @@ enum class NnDemosaicStatus {
     InvalidParam       // null pointers, zero dimensions, etc.
 };
 
-/** Run the full x-veon NN demosaic pipeline.
+/** Run the x-veon NN demosaic pipeline up to (but not including) the finalize
+ *  step: CFA prep, mirror-pad, tile inference and trapezoid-blended accumulation.
+ *  `out` is filled with the padded accumulators + geometry; the caller finalizes
+ *  (crop + weight-normalize + color matrix + orientation) — see NnDemosaicOutput.
  *
  *  @param in   CFA + metadata bundle (see NnDemosaicInput).
- *  @param out  filled with linear white-balanced camRGB on Ok (rgbInterleaved
- *              resized to width*height*3, width/height set); contents undefined
+ *  @param out  on Ok, outAccum/weightAccum resized over the padded extent and
+ *              paddedW/width/height/phaseDx/phaseDy set; contents undefined
  *              otherwise.
  *  @return status; see NnDemosaicStatus.
  *

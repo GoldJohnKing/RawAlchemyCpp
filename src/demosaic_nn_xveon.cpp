@@ -10,8 +10,8 @@
 //   5. build canonical masks + trapezoid blend window (tile-invariant)
 //   6. OpenMP-parallel tile loop: pack [1,4,288,288] input -> ORT Run ->
 //      NaN guard -> trapezoid-weighted accumulate into RGB/weight buffers
-//   7. divide accumulate by weights, crop padding (output: raw camRGB;
-//      caller applies the camera color matrix downstream)
+//   7. hand off the accumulated buffers + geometry (caller finalizes: crop +
+//      weight-normalize + color matrix + orientation flip)
 //
 // Deviation from the design: the design lists a highlight-reconstruction step
 // (inpaint-opposed, §2.3 step 4) before WB. No highlight-recon primitive was
@@ -99,19 +99,23 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     const int W = in.width;
     const int H = in.height;
 
-    // --- Step 2: working copy + normalize (do not mutate caller's CFA) ---
+    // --- Steps 2+3 fused: working copy + normalize + per-site white balance ---
+    // One pass replaces the previous separate copy + normalize + WB steps.
+    // Normalization (raw - black) / (white - black) composes with the per-site
+    // WB multiplier, so each output site is computed straight from the caller's
+    // CFA. range<=0 zeroes all sites (degenerate-range guard).
+    const float black = in.blackLevel;
+    const float range = in.whiteLevel - in.blackLevel;
+    const float invRange = (range > 0.0f) ? (1.0f / range) : 0.0f;
     std::vector<float> workingCfa(static_cast<size_t>(W) * static_cast<size_t>(H));
-    std::copy(in.cfaMosaic, in.cfaMosaic + workingCfa.size(), workingCfa.begin());
-    normalizeCfaInPlace(workingCfa.data(), workingCfa.size(), in.blackLevel, in.whiteLevel);
-
-    // --- Step 3: per-site white balance (design §2.3 step 5).
-    // After phase-align mirror-pad by (dy,dx), original pixel (y,x) lands at
-    // canonical position (y+dy, x+dx), so its WB channel is the canonical
-    // color at that position.
     for (int y = 0; y < H; ++y) {
         for (int x = 0; x < W; ++x) {
+            // After phase-align mirror-pad by (dy,dx), original pixel (y,x)
+            // lands at canonical position (y+dy, x+dx), so its WB channel is
+            // the canonical color at that position.
             const int ch = canonicalCfaColor(y + phase.dy, x + phase.dx, phase);
-            workingCfa[static_cast<size_t>(y) * W + x] *= in.wbRgb[ch];
+            const size_t i = static_cast<size_t>(y) * W + x;
+            workingCfa[i] = (in.cfaMosaic[i] - black) * invRange * in.wbRgb[ch];
         }
     }
 
@@ -273,31 +277,17 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         return NnDemosaicStatus::InferenceFailed;
     }
 
-    // --- Step 7: normalize accumulation, crop padding ---
-    // Output is the model's raw camRGB (white-balanced, linear, negatives
-    // preserved — unclamped). The caller applies the camera color matrix
-    // (e.g. camRGB->ProPhoto via LibRaw cam_xyz) downstream to avoid an
-    // sRGB-gamut intermediate that would clip wide-gamut colors.
-    const size_t outPix = static_cast<size_t>(W) * static_cast<size_t>(H);
-    out.rgbInterleaved.assign(outPix * 3, 0.0f);
-    float* outRgbInterleaved = out.rgbInterleaved.data();
-
-    for (int y = 0; y < H; ++y) {
-        for (int x = 0; x < W; ++x) {
-            // Original pixel (y,x) lives at padded position (y+dy, x+dx).
-            const size_t pIdx =
-                static_cast<size_t>(y + phase.dy) * paddedW + (x + phase.dx);
-            const float w = weightAccum[pIdx];
-            const float invW = (w > 0.0f) ? (1.0f / w) : 0.0f;
-            float* dst = &outRgbInterleaved[(static_cast<size_t>(y) * W + x) * 3];
-            dst[0] = outAccum[pIdx * 3 + 0] * invW;
-            dst[1] = outAccum[pIdx * 3 + 1] * invW;
-            dst[2] = outAccum[pIdx * 3 + 2] * invW;
-        }
-    }
-
+    // --- Step 7: hand off the accumulated buffers + geometry ---
+    // Finalize (crop + weight-normalize + color matrix + orientation) is done by
+    // the caller, fused into a single pass so no full-image camRGB intermediate
+    // is materialized. See NnDemosaicOutput for the recovery formula.
+    out.outAccum = std::move(outAccum);
+    out.weightAccum = std::move(weightAccum);
+    out.paddedW = paddedW;
     out.width = W;
     out.height = H;
+    out.phaseDx = phase.dx;
+    out.phaseDy = phase.dy;
 
     nnlog::info("[NN] demosaic: %zu tiles, total inference %lld ms",
                 tileCount.load(), totalInferenceMs.load());

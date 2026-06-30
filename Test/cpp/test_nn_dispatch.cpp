@@ -149,12 +149,29 @@ int main() {
     assert(status == NnDemosaicStatus::Ok);
     assert(out.width == W);
     assert(out.height == H);
-    assert(out.rgbInterleaved.size() == static_cast<size_t>(W) * H * 3);
+
+    // Finalize the accumulated output (crop + weight-normalize) into camRGB to
+    // verify dimensions + finiteness. Production fuses this with the color
+    // matrix + orientation flip; here we just reconstruct the camRGB the old
+    // contract held. See NnDemosaicOutput for the recovery formula.
+    std::vector<float> camRgb(static_cast<size_t>(W) * H * 3);
+    for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+            const size_t pIdx =
+                static_cast<size_t>(y + out.phaseDy) * out.paddedW + (x + out.phaseDx);
+            const float w = out.weightAccum[pIdx];
+            const float invW = (w > 0.0f) ? (1.0f / w) : 0.0f;
+            const size_t o = (static_cast<size_t>(y) * W + x) * 3;
+            camRgb[o + 0] = out.outAccum[pIdx * 3 + 0] * invW;
+            camRgb[o + 1] = out.outAccum[pIdx * 3 + 1] * invW;
+            camRgb[o + 2] = out.outAccum[pIdx * 3 + 2] * invW;
+        }
+    }
 
     // Belt-and-suspenders finiteness check. The pipeline's own NaN guard
     // (nn_nan_guard.cpp) already rejects NaN/Inf output via NaNOutput, so by
     // the time we see Ok the output must be finite. Verify it anyway.
-    for (float v : out.rgbInterleaved) {
+    for (float v : camRgb) {
         assert(std::isfinite(v));
     }
 

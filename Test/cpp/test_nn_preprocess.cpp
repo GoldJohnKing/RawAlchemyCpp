@@ -9,17 +9,6 @@
 int main() {
     using namespace rawalchemy;
 
-    // --- normalizeCfaInPlace ---
-    {
-        float cfa[] = {100.0f, 200.0f, 300.0f, 400.0f};
-        normalizeCfaInPlace(cfa, 4, /*black=*/100.0f, /*white=*/300.0f);
-        // (raw-100)/(300-100) = (raw-100)/200
-        assert(std::fabs(cfa[0] - 0.0f) < 1e-6f);
-        assert(std::fabs(cfa[1] - 0.5f) < 1e-6f);
-        assert(std::fabs(cfa[2] - 1.0f) < 1e-6f);
-        assert(std::fabs(cfa[3] - 1.5f) < 1e-6f);  // HDR pass-through above 1.0
-    }
-
     // --- detectCfaPhase: RGGB ---
     {
         CfaPhase p = detectCfaPhase(0x94949494u);
