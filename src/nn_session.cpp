@@ -111,7 +111,7 @@ static void ensureQnnLibraryPaths() {
 // on-disk context cache invalidates and rebuilds instead of going stale.
 constexpr const char* kQnnRuntimeVersion = "2.42.0";
 constexpr const char* kOrtVersion = "1.24.1";
-constexpr const char* kNnOptsFingerprint = "sustained-m3-vtcm8-fp16";
+constexpr const char* kNnOptsFingerprint = "burst-m3-vtcm8-fp16";
 
 bool fileExists(const std::string& path) {
     if (path.empty()) return false;
@@ -190,9 +190,12 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
         sopts.AddConfigEntry("session.record_ep_graph_assignment_info", "1");
         std::unordered_map<std::string, std::string> qnnOpts;
         qnnOpts.emplace("backend_path", "libQnnHtp.so");
-        // sustained (not burst): batch photo processing is long-running; burst
-        // triggers thermal throttle/SSR and has a known ORT perf bug (#24417).
-        qnnOpts.emplace("htp_performance_mode", "sustained_high_performance");
+        // burst (not sustained_high_performance): although batch processing runs
+        // many photos, each RAW transfer over camera WiFi is the bottleneck
+        // (seconds per file), giving the NPU ample cooling gaps between demosaics
+        // — so burst's thermal-throttle/SSR risk doesn't materialize, and its
+        // ~10% per-tile speed edge over sustained wins.
+        qnnOpts.emplace("htp_performance_mode", "burst");
         qnnOpts.emplace("enable_htp_fp16_precision", "1");
         qnnOpts.emplace("soc_model", cfg.socModel.empty() ? std::string{"0"} : cfg.socModel);
         if (!cfg.htpArch.empty()) qnnOpts.emplace("htp_arch", cfg.htpArch);
