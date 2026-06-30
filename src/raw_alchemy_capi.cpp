@@ -579,7 +579,7 @@ RA_API void RA_CALL raWarmupNnSession(void) {
     }
 }
 
-bool raIsNnReady(void) {
+RA_API bool RA_CALL raIsNnReady(void) {
     return rawalchemy::NnDemosaicSession::instance().isReady();
 }
 
