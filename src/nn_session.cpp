@@ -352,12 +352,21 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
     if (ready_.load(std::memory_order_acquire)) {
         return true;
     }
+    // Latched failure: a prior init() determined NPU is unavailable. Don't
+    // re-attempt — availability is stable for the process and re-compiling
+    // costs seconds each call. Restart the app to retry.
+    if (initFailed_.load(std::memory_order_acquire)) {
+        return false;
+    }
 
     // Serialize concurrent callers (background warmup + first edit). The first
     // through the lock compiles; latecomers block, then observe ready on re-check.
     std::lock_guard<std::mutex> lk(initMutex_);
     if (ready_.load(std::memory_order_relaxed)) {
         return true;  // double-check under lock
+    }
+    if (initFailed_.load(std::memory_order_relaxed)) {
+        return false;
     }
 
     try {
@@ -383,11 +392,11 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
         // Honor the header contract: init() never throws — log, clean up,
         // return false so callers route to traditional demosaic. (Previously
         // this threw std::runtime_error, contradicting the "never throws" doc.)
-        nnlog::info("[NN] session init failed: %s", e.what());
+        nnlog::info("[NN] session init failed (latching): %s", e.what());
         impl_->env = Ort::Env{};
         impl_->bayerSession.reset();
         impl_->xtransSession.reset();
-        // ready_ stays false; a later init() call may re-attempt.
+        initFailed_.store(true, std::memory_order_release);  // LATCH for the session
         return false;
     }
 

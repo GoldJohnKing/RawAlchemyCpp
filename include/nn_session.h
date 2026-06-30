@@ -64,9 +64,12 @@ public:
 
     /** Initialize both sessions. Returns true only if BOTH models load AND the
      *  platform EP registers without error. Any failure (EP unavailable, model
-     *  file missing, ORT error) returns false; the caller treats false as
-     *  permanent and routes to traditional demosaic. Idempotent: a no-op after
-     *  success; re-attempts after failure. */
+     *  file missing, ORT error, or verifyQnnEngaged rejecting silent full-CPU
+     *  fallback) returns false; the caller treats false as permanent and routes
+     *  to traditional demosaic. Failure is LATCHED for the process lifetime:
+     *  once init() returns false it will not re-attempt (NPU availability is
+     *  stable for a session, and re-compiling wastes seconds per call). Restart
+     *  the app to retry. Thread-safe (double-checked locking). Never throws. */
     bool init(const NnSessionConfig& cfg);
 
     /** True after a successful init(). */
@@ -90,6 +93,7 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
     std::atomic<bool> ready_{false};
+    std::atomic<bool> initFailed_{false};  // latches the first init() failure; see init() doc
     std::mutex initMutex_;  // guards init() against concurrent callers
 };
 

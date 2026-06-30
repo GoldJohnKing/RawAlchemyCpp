@@ -183,6 +183,13 @@ RA_API RaResult RA_CALL raProcessToBuffer(
  *  ~2s QNN graph compile overlaps with the user browsing photos. */
 RA_API void RA_CALL raWarmupNnSession(void);
 
+/** Returns true iff the NN demosaic session successfully initialized (NPU
+ *  engaged). Intended for the Rust fallback router to distinguish an NN-
+ *  structural-unavailability failure (init failed → latch classical for the
+ *  session) from a per-file NN error on a ready session (fall back for this
+ *  file only, no latch). */
+RA_API bool RA_CALL raIsNnReady(void);
+
 /* ----------------------------------------------------------------
  *  Preview Session — two-phase preview pipeline
  *
