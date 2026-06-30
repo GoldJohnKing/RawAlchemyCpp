@@ -347,14 +347,22 @@ NnDemosaicSession& NnDemosaicSession::instance() {
 }
 
 bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
-    // A prior successful init is a no-op.
-    if (ready_) {
+    // Fast path: already ready (lock-free, acquire so the compile-side release
+    // is visible).
+    if (ready_.load(std::memory_order_acquire)) {
         return true;
+    }
+
+    // Serialize concurrent callers (background warmup + first edit). The first
+    // through the lock compiles; latecomers block, then observe ready on re-check.
+    std::lock_guard<std::mutex> lk(initMutex_);
+    if (ready_.load(std::memory_order_relaxed)) {
+        return true;  // double-check under lock
     }
 
     try {
         auto t0 = std::chrono::high_resolution_clock::now();
-        // One shared Env for all sessions. Threading mode is ORT default (multi).
+        // One shared Env for all sessions.
         impl_->env = Ort::Env{ORT_LOGGING_LEVEL_WARNING, "rawalchemy-nn-demosaic"};
 
         // Each session is built via createSessionWithCache: on Android it serves
@@ -371,31 +379,28 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
         auto t1 = std::chrono::high_resolution_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
         nnlog::info("[NN] session init took %lld ms", static_cast<long long>(ms));
-    } catch (const Ort::Exception& e) {
-        // Propagate the ORT error message (don't swallow to stderr — invisible on Android)
-        impl_->env = Ort::Env{};
-        impl_->bayerSession.reset();
-        impl_->xtransSession.reset();
-        ready_ = false;
-        throw std::runtime_error(std::string("[NN] ORT session init failed: ") + e.what());
     } catch (const std::exception& e) {
+        // Honor the header contract: init() never throws — log, clean up,
+        // return false so callers route to traditional demosaic. (Previously
+        // this threw std::runtime_error, contradicting the "never throws" doc.)
+        nnlog::info("[NN] session init failed: %s", e.what());
         impl_->env = Ort::Env{};
         impl_->bayerSession.reset();
         impl_->xtransSession.reset();
-        ready_ = false;
-        throw std::runtime_error(std::string("[NN] session init failed: ") + e.what());
+        // ready_ stays false; a later init() call may re-attempt.
+        return false;
     }
 
-    ready_ = true;
+    ready_.store(true, std::memory_order_release);
     return true;
 }
 
 bool NnDemosaicSession::isReady() const {
-    return ready_;
+    return ready_.load(std::memory_order_acquire);
 }
 
 Ort::Session* NnDemosaicSession::sessionForCfaPeriod(int period) {
-    if (!ready_) {
+    if (!ready_.load(std::memory_order_acquire)) {
         return nullptr;
     }
     if (period == NN_CFA_PERIOD_BAYER) {

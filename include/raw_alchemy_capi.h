@@ -175,6 +175,14 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     int         enableNnDemosaic
 );
 
+/** Eagerly initialize the NN demosaic session in the background. Reads the same
+ *  RA_NN_* env vars as raProcessFile* and calls NnDemosaicSession::init().
+ *  Best-effort: any failure is logged and swallowed (init() itself never throws
+ *  after the thread-safety fix); the edit path will re-attempt if this didn't
+ *  succeed. Intended to be called from a background thread at app launch so the
+ *  ~2s QNN graph compile overlaps with the user browsing photos. */
+RA_API void RA_CALL raWarmupNnSession(void);
+
 /* ----------------------------------------------------------------
  *  Preview Session — two-phase preview pipeline
  *

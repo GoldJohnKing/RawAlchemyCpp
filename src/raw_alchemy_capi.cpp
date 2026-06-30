@@ -5,6 +5,7 @@
 
 #include "raw_alchemy_capi.h"
 
+#include "nn_session.h"
 #include "raw_decoder.h"
 #include "metering.h"
 #include "tiff_writer.h"
@@ -546,6 +547,35 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         return RA_OK;
     } catch (...) {
         return catchExceptions("raProcessToBuffer");
+    }
+}
+
+// ----------------------------------------------------------------
+//  NN session warmup
+// ----------------------------------------------------------------
+
+RA_API void RA_CALL raWarmupNnSession(void) {
+    // Defensive guard: init() shouldn't throw after the thread-safety fix, but
+    // this runs on a fire-and-forget background thread at app launch — never let
+    // an exception escape into the async runtime.
+    try {
+        rawalchemy::NnSessionConfig cfg;
+        if (const char* p = std::getenv("RA_NN_BAYER_MODEL"))  cfg.bayerModelPath  = p;
+        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) cfg.xtransModelPath = p;
+#ifdef _WIN32
+        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) cfg.directmlDllPath = p;
+#elif defined(__ANDROID__)
+        if (const char* p = std::getenv("RA_NN_SOC_MODEL"))   cfg.socModel   = (p && *p) ? std::string(p) : std::string("0");
+        if (const char* p = std::getenv("RA_NN_HTP_ARCH"))    cfg.htpArch    = (p ? std::string(p) : std::string());
+        if (const char* p = std::getenv("RA_NN_CTX_DIR"))     cfg.ctxDir     = (p ? std::string(p) : std::string());
+        if (const char* p = std::getenv("RA_NN_APP_VERSION")) cfg.appVersion = (p ? std::string(p) : std::string());
+#endif
+        // Best-effort: init() returns false on failure (never throws). The edit
+        // path will re-attempt via decodeRawNn if this background call didn't
+        // succeed. If it did succeed, the edit path's init() is a lock-free no-op.
+        rawalchemy::NnDemosaicSession::instance().init(cfg);
+    } catch (...) {
+        // Swallow — background warmup must never crash the app.
     }
 }
 

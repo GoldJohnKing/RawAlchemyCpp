@@ -12,7 +12,9 @@
 // including this header does NOT pull the ORT C++ wrapper header into callers.
 // The only Ort:: type that appears here is Session, as an opaque pointer return.
 #pragma once
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 
 // Forward-declared only — the complete definitions live in nn_session.cpp, which
@@ -51,9 +53,11 @@ struct NnSessionConfig {
 };
 
 /** Singleton wrapping the ONNX Runtime lifecycle for the two x-veon demosaic
- *  models. Thread-safe after init(): construction is lazy (Meyers singleton),
- *  and init() must be called once from a single thread before any inference.
- *  Inference itself (Run) is thread-safe per ORT's contract. */
+ *  models. Fully thread-safe: construction is lazy (Meyers singleton), and
+ *  init() is internally synchronized (double-checked locking on an atomic
+ *  ready flag) so concurrent callers — e.g. a background warmup at app launch
+ *  and the first edit — serialize: the first compiles, the rest wait then
+ *  observe ready. Inference itself (Run) is thread-safe per ORT's contract. */
 class NnDemosaicSession {
 public:
     static NnDemosaicSession& instance();
@@ -85,7 +89,8 @@ private:
     // the ORT C++ wrapper header never reaches callers of this header.
     struct Impl;
     std::unique_ptr<Impl> impl_;
-    bool ready_ = false;
+    std::atomic<bool> ready_{false};
+    std::mutex initMutex_;  // guards init() against concurrent callers
 };
 
 }  // namespace rawalchemy
