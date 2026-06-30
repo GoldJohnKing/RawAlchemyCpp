@@ -238,6 +238,7 @@ public:
 // camRgbToProPhotoLinear merges us back into the classical pipeline's contract
 // (linear ProPhoto [0,1]) so lens/vLog/LUT are unchanged.
 
+#ifdef RA_ENABLE_NN_DEMOSAIC
 /// Populate NnDemosaicInput.wbRgb + .xyzToCam from LibRaw color data.
 static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
     const auto& color = raw.imgdata.color;
@@ -430,6 +431,7 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
 
     return result;
 }
+#endif // RA_ENABLE_NN_DEMOSAIC
 
 // ---- decodeRaw ----
 ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
@@ -557,9 +559,11 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     // directly. Unreachable unless params.enableNnDemosaic is set AND models are
     // loaded (Task 8 exercises it). Throws on failure; the CAPI layer wraps the
     // exception into an RaResult.
+#ifdef RA_ENABLE_NN_DEMOSAIC
     if (params.enableNnDemosaic && !params.halfSize) {
         return decodeRawNn(rawProcessor, params);
     }
+#endif
 
     // --- Process (demosaic + color conversion + gamma) ---
     // With our callbacks registered, LibRaw calls our RCD/Markesteijn

@@ -550,6 +550,7 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     }
 }
 
+#ifdef RA_ENABLE_NN_DEMOSAIC
 // ----------------------------------------------------------------
 //  NN session warmup
 // ----------------------------------------------------------------
@@ -582,6 +583,7 @@ RA_API void RA_CALL raWarmupNnSession(void) {
 RA_API bool RA_CALL raIsNnReady(void) {
     return rawalchemy::NnDemosaicSession::instance().isReady();
 }
+#endif // RA_ENABLE_NN_DEMOSAIC
 
 // ----------------------------------------------------------------
 //  Utility

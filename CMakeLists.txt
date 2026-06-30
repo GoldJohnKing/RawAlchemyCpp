@@ -446,7 +446,6 @@ endif()
 # ---- Library target ----
 set(RA_LIBRARY_SOURCES
     src/raw_decoder.cpp
-    src/demosaic_dispatch.cpp
     src/demosaic_rcd.cpp
     src/demosaic_markesteijn.cpp
     src/dwt_denoise.cpp
@@ -462,17 +461,30 @@ set(RA_LIBRARY_SOURCES
     src/lens_correction.cpp
     src/exif_injector.cpp
     src/win_unicode.cpp
-    src/nn_nan_guard.cpp
-    src/nn_preprocess.cpp
-    src/nn_highlight_recon.cpp
-    src/nn_highlight_segbased.cpp
-    src/nn_segmentation.cpp
-    src/nn_image_primitives.cpp
-    src/nn_postprocess.cpp
-    src/nn_session.cpp
-    src/demosaic_nn_xveon.cpp
-    src/nn_color_adapt.cpp
 )
+
+# NN demosaic sources — compiled in only when RA_ENABLE_NN_DEMOSAIC is ON. All
+# ORT/QNN includes and linkage live in these files; gating them as a group keeps
+# the "legacy" build free of the ORT headers and the onnxruntime/QNN shared-
+# library dependency, so raw_alchemy_core.so dlopens cleanly without them. Call
+# sites that reference these symbols (raw_decoder.cpp::decodeRawNn,
+# raw_alchemy_capi.cpp::raWarmupNnSession/raIsNnReady) are #ifdef-guarded to
+# match — see the matching #ifdef RA_ENABLE_NN_DEMOSAIC blocks there.
+if(RA_ENABLE_NN_DEMOSAIC)
+    list(APPEND RA_LIBRARY_SOURCES
+        src/demosaic_dispatch.cpp
+        src/nn_nan_guard.cpp
+        src/nn_preprocess.cpp
+        src/nn_highlight_recon.cpp
+        src/nn_highlight_segbased.cpp
+        src/nn_segmentation.cpp
+        src/nn_image_primitives.cpp
+        src/nn_postprocess.cpp
+        src/nn_session.cpp
+        src/demosaic_nn_xveon.cpp
+        src/nn_color_adapt.cpp
+    )
+endif()
 
 # Add C API sources when building the C API
 if(BUILD_CAPI)
