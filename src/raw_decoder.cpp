@@ -251,39 +251,32 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
             in.xyzToCam[i * 3 + j] = static_cast<float>(color.cam_xyz[i][j]);
 }
 
-    // Rotate an RGB ImageBuffer to display orientation, mirroring LibRaw's
-    // flip_index() (file_write.cpp:22-31): bit 2 = transpose, bit 1 = vertical
-    // mirror, bit 0 = horizontal mirror. The classical decode path gets this
-    // inside dcraw_process/copy_mem_image; the NN path returns before that step,
-    // so it must rotate explicitly to keep the downstream EXIF Orientation=1
-    // (rotation baked into pixels) convention valid for portrait images.
-    static ImageBuffer applyOrientationFlip(ImageBuffer src, int flip) {
-        if (flip == 0) return src;
-
-        const int W = src.width;
-        const int H = src.height;
-        const bool transpose = (flip & 4) != 0;
-        const int outW = transpose ? H : W;
-        const int outH = transpose ? W : H;
-
-        ImageBuffer out(outW, outH, 3);
-        const float* s = src.ptr();
-        float* d = out.ptr();
-
-        for (int orow = 0; orow < outH; ++orow) {
-            for (int ocol = 0; ocol < outW; ++ocol) {
+    // Fused camRGB->ProPhoto conversion + orientation flip in a single pass, so
+    // the NN path needs no separate rotate buffer for portrait images. Mirrors
+    // LibRaw's flip_index() (file_write.cpp:22-31): bit 2 = transpose, bit 1 =
+    // vertical mirror, bit 0 = horizontal mirror. The color matrix is position-
+    // invariant, so convert-and-rearrange is bit-identical to convert-then-rotate.
+    // camRgb is sensor-native (srcW x srcH); dst is display-oriented (dstW x dstH).
+    static void convertCamRgbToProPhotoFlipped(float* dst, int dstW, int dstH,
+                                                const float* camRgb,
+                                                int srcW, int srcH,
+                                                int flip, const float outCam[9]) {
+        for (int orow = 0; orow < dstH; ++orow) {
+            for (int ocol = 0; ocol < dstW; ++ocol) {
                 int r = orow, c = ocol;
                 if (flip & 4) std::swap(r, c);
-                if (flip & 2) r = H - 1 - r;
-                if (flip & 1) c = W - 1 - c;
-                const size_t srcIdx = (static_cast<size_t>(r) * W + c) * 3;
-                const size_t dstIdx = (static_cast<size_t>(orow) * outW + ocol) * 3;
-                d[dstIdx + 0] = s[srcIdx + 0];
-                d[dstIdx + 1] = s[srcIdx + 1];
-                d[dstIdx + 2] = s[srcIdx + 2];
+                if (flip & 2) r = srcH - 1 - r;
+                if (flip & 1) c = srcW - 1 - c;
+                const size_t srcIdx = (static_cast<size_t>(r) * srcW + c) * 3;
+                const float cr = camRgb[srcIdx + 0];
+                const float cg = camRgb[srcIdx + 1];
+                const float cb = camRgb[srcIdx + 2];
+                const size_t dstIdx = (static_cast<size_t>(orow) * dstW + ocol) * 3;
+                dst[dstIdx + 0] = outCam[0] * cr + outCam[1] * cg + outCam[2] * cb;
+                dst[dstIdx + 1] = outCam[3] * cr + outCam[4] * cg + outCam[5] * cb;
+                dst[dstIdx + 2] = outCam[6] * cr + outCam[7] * cg + outCam[8] * cb;
             }
         }
-        return out;
     }
 
     /// Decode via the x-veon NN demosaic. Returns linear ProPhoto RGB [0,1].
@@ -377,7 +370,15 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
     // the same matrix the classical output_color=4 path uses) so we are
     // bit-identical into vLog/LUT.
 
-    ImageBuffer result(w, h, 3);
+    // Allocate at display dimensions: the NN path bypasses LibRaw's flip (applied
+    // in dcraw_process), so the orientation is folded into the camRGB->ProPhoto
+    // conversion below — one pass, no separate rotate buffer. flip==0 (landscape)
+    // stays on the zero-overhead sequential conversion path.
+    const int flip = img.sizes.flip;
+    const bool transpose = (flip & 4) != 0;
+    const int outW = transpose ? h : w;
+    const int outH = transpose ? w : h;
+    ImageBuffer result(outW, outH, 3);
 
     // camRGB→ProPhoto matching LibRaw convert_to_rgb() output_color=4 exactly:
     //   out_cam = prophoto_rgb · rgb_cam   (postprocessing_utils_dcrdefs.cpp:98-101)
@@ -393,13 +394,14 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
         outCam[1][0], outCam[1][1], outCam[1][2],
         outCam[2][0], outCam[2][1], outCam[2][2]
     };
-    camRgbToProPhotoLinear(result.ptr(), out.rgbInterleaved.data(),
-                           result.pixelCount(), camToProPhoto);
-
-    // Rotate to display orientation: the NN path bypasses LibRaw's flip
-    // (normally applied during dcraw_process), so without this any non-landscape
-    // shot (flip != 0) would ship sensor-native pixels under EXIF Orientation=1.
-    result = applyOrientationFlip(std::move(result), img.sizes.flip);
+    if (flip == 0) {
+        camRgbToProPhotoLinear(result.ptr(), out.rgbInterleaved.data(),
+                               result.pixelCount(), camToProPhoto);
+    } else {
+        convertCamRgbToProPhotoFlipped(result.ptr(), outW, outH,
+                                        out.rgbInterleaved.data(), w, h,
+                                        flip, camToProPhoto);
+    }
 
     return result;
 }
