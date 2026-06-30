@@ -83,19 +83,9 @@ void applyGradingFused(ImageBuffer& img, const GradingParams& params) {
 
         if (doBoost) {
             float lum = Lr * r + Lg * g + Lb * b;
-            // Taper the saturation boost toward 1.0 in the highlight region so grading
-            // doesn't re-amplify chroma that desaturateHighlightsLinear just suppressed.
-            // sat ramps sat→1.0 over luma [0.5, 0.9], keeping midtone punch while leaving
-            // highlights desaturated.
-            float effSat = sat;
-            if (lum > 0.5f) {
-                float taper = (lum - 0.5f) * 2.5f;   // 0 at lum=0.5, 1 at lum=0.9
-                if (taper > 1.0f) taper = 1.0f;
-                effSat = sat + (1.0f - sat) * taper;  // interpolates sat → 1.0
-            }
-            float rs = lum + (r - lum) * effSat;
-            float gs = lum + (g - lum) * effSat;
-            float bs = lum + (b - lum) * effSat;
+            float rs = lum + (r - lum) * sat;
+            float gs = lum + (g - lum) * sat;
+            float bs = lum + (b - lum) * sat;
             r = std::max(0.0f, (rs - pivot) * cont + pivot);
             g = std::max(0.0f, (gs - pivot) * cont + pivot);
             b = std::max(0.0f, (bs - pivot) * cont + pivot);
