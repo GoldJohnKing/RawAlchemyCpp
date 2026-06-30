@@ -28,21 +28,22 @@ constexpr float kNnHighlightClipFactor = 0.93f;
 
 /** Reconstruct clipped CFA sensels in place using the inpaint-opposed algorithm.
  *
- *  Runs PRE white-balance and PRE mirror-pad. The sensor color of original pixel
- *  (y,x) is read via canonicalCfaColor(y + phase.dy, x + phase.dx, phase) — the same
- *  lookup the WB pass uses, giving the actual sensor phase before canonical alignment.
+ *  Runs POST white-balance and PRE mirror-pad — matches darktable's pipeline order
+ *  (rawprepare → WB → highlights → demosaic). The sensor color of original pixel
+ *  (y,x) is read via canonicalCfaColor(y + phase.dy, x + phase.dx, phase).
  *
- *  @param cfa         [W*H] float, normalized to [0,1] where 1.0 = nominal white
- *                     (LibRaw img.color.maximum). Genuinely-clipped sensels may read
- *                     >1.0 (adjusted-maximum normalization). Reconstructed in place.
+ *  @param cfa         [W*H] float, WB-applied, normalized. Clipped sensels may read
+ *                     well above 1.0 (WB amplifies R/B). Reconstructed in place.
  *  @param W,H         active CFA dimensions.
  *  @param phase       CFA phase (Bayer 2×2 or X-Trans 6×6) from detectCfaPhase().
- *  @param clipFactor  fraction of nominal white defining the clip threshold.
+ *  @param clipFactor  base fraction of nominal white (scaled per-channel by wbRgb).
+ *  @param wbRgb       per-channel WB multipliers; clips[c] = clipFactor × wbRgb[c].
  *
  *  No-op (early exit) when no sensel reaches the clip threshold, so well-exposed
  *  images pay only the cost of the mask-build scan. Single-threaded; tile inference
  *  dominates end-to-end time and the early-exit keeps the common case cheap. */
 void reconstructHighlightsOpposed(float* cfa, int W, int H,
-                                 const CfaPhase& phase, float clipFactor);
+                                 const CfaPhase& phase, float clipFactor,
+                                 const float wbRgb[3]);
 
 } // namespace rawalchemy

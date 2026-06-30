@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Inpaint-opposed highlight reconstruction — see nn_highlight_recon.h.
+// Runs POST white-balance (darktable-faithful position: clips scale per-channel by wbRgb).
 //
-// Deliberate deviations from the darktable reference (each required by this pipeline):
-//   1. clips[c] = clipFactor UNIFORMLY. darktable (opposed.c:97) scales clips by the WB
-//      coefficients icoeffs[c] because it runs opposed POST-WB in its default pipeline.
-//      We run PRE-WB (design §2.3 step 4 → step 5), which is darktable's wbon=false path
-//      where icoeffs={1,1,1} — so uniform clips is the faithful equivalent here, not a
-//      lossy approximation. (Earlier revisions of this comment mis-attributed the uniform
-//      clips to a nominal_white collapse; the actual cause is the pipeline position.)
-//   2. correction = {1,1,1} (pre-WB). Equivalent to darktable's late=FALSE path.
-//   3. clipFactor = 0.93 (design §2.3 step 4), not darktable's 0.987 default.
-//   4. Single-threaded (no OpenMP). One-time per image; the tile-inference loop
+// Deliberate deviations from the darktable reference:
+//   1. correction = {1,1,1} (darktable's late=FALSE path). darktable's late=TRUE uses
+//      D85/as_shot ratios; we don't track those separately, and late=false is the
+//      simpler default that doesn't require chroma-adaptation metadata.
+//   2. clipFactor = 0.93 (design §2.3 step 4), not darktable's 0.987 default.
+//   3. Single-threaded (no OpenMP). One-time per image; the tile-inference loop
 //      dominates latency and the !anyClipped fast path keeps well-exposed images cheap.
 //
-// Everything else — the 3×3 refavg window, the cube-root opposing-mean formula, the
-// two-ring dilation offsets, the lo=0.2*clips chroma bound, the 100-sample minimum, and
-// the step-D max(inval, ref+chroma) reconstruction — is copied 1:1 from opposed.c.
-// Port only; do not "improve" the bounds without re-deriving against upstream.
+// Per-channel clips (clips[c] = clipFactor × wbRgb[c]), the 3×3 refavg window, the
+// cube-root opposing-mean formula, the two-ring dilation offsets, the lo=0.2×clips
+// chroma bound, the 100-sample minimum, and the step-D max(inval, ref+chroma)
+// reconstruction are all copied 1:1 from opposed.c. Port only; do not "improve".
 
 #include "nn_highlight_recon.h"
 
@@ -102,7 +99,8 @@ inline bool maskDilated(const uint8_t* in, int w) {
 } // namespace
 
 void reconstructHighlightsOpposed(float* cfa, int W, int H,
-                                 const CfaPhase& phase, float clipFactor) {
+                                 const CfaPhase& phase, float clipFactor,
+                                 const float wbRgb[3]) {
     const int mW = W / 3;
     const int mH = H / 3;
     // The hollow dist-2..3 dilation ring needs ≥3 superpixels of margin on each side.
@@ -121,8 +119,10 @@ void reconstructHighlightsOpposed(float* cfa, int W, int H,
         }
     }
 
-    const float clips = clipFactor;          // uniform — see file-header deviation #1
-    const float loClip = kLoClipFrac * clips;
+    // Per-channel clips scaled by WB (darktable: clips[c] = clipval * icoeffs[c]).
+    // Post-WB, clipped R/B sensels read wb_R/wb_B times higher; the threshold tracks.
+    const float clips[3] = { clipFactor * wbRgb[0], clipFactor * wbRgb[1], clipFactor * wbRgb[2] };
+    const float loClip[3] = { kLoClipFrac * clips[0], kLoClipFrac * clips[1], kLoClipFrac * clips[2] };
 
     // 6 mask planes on the 1/3 superpixel grid: [0..2]=clipped vote, [3..5]=dilated.
     const size_t mSize = static_cast<size_t>(mW) * mH;
@@ -140,7 +140,8 @@ void reconstructHighlightsOpposed(float* cfa, int W, int H,
                 const size_t rowBase = static_cast<size_t>(r) * W;
                 for (int x = 0; x < 3; ++x) {
                     const int c = 3 * mx + x;
-                    if (cfa[rowBase + c] >= clips) ++present[fc[rowBase + c]];
+                    const int ch = fc[rowBase + c];
+                    if (cfa[rowBase + c] >= clips[ch]) ++present[ch];
                 }
             }
             const size_t mdx = static_cast<size_t>(my) * mW + mx;
@@ -183,7 +184,7 @@ void reconstructHighlightsOpposed(float* cfa, int W, int H,
             const size_t i = rowBase + x;
             const int c = fc[i];
             const float v = cfa[i];
-            if (v < clips && v > loClip && dilated[c][mrowBase + (x / 3)]) {
+            if (v < clips[c] && v > loClip[c] && dilated[c][mrowBase + (x / 3)]) {
                 sum[c] += static_cast<double>(v - calcRefavg(cfa, W, H, y, x, c, fc.data()));
                 ++cnt[c];
             }
@@ -209,8 +210,8 @@ void reconstructHighlightsOpposed(float* cfa, int W, int H,
         for (int x = 0; x < W; ++x) {
             const size_t i = rowBase + x;
             const float v = cfa[i];
-            if (v >= clips) {
-                const int c = fc[i];
+            const int c = fc[i];
+            if (v >= clips[c]) {
                 const float ref = calcRefavg(cfa, W, H, y, x, c, fc.data());
                 cfa[i] = std::max(v, ref + chroma[c]);
             }

@@ -4,9 +4,9 @@
 // Pipeline (design docs/nn-demosaic-design.md §2.3-§2.4):
 //   1. param validation + session readiness
 //   2. normalize CFA in place (working copy): (raw - black) / (white - black)
-//   3. inpaint-opposed highlight reconstruction (reconstruct clipped sensels from
-//      opposing-channel means, BEFORE white balance — see nn_highlight_recon.cpp)
-//   4. per-site white balance on the working copy
+//   3. per-site white balance on the working copy
+//   4. highlight reconstruction (post-WB, darktable-faithful position: opposed +
+//      segmentation-based, per-channel clips scaled by WB)
 //   5. mirror-pad top/left by (dy,dx) to phase-align to the canonical pattern,
 //      and right/bottom so an integer tile grid covers the whole image
 //   6. build canonical masks + trapezoid blend window (tile-invariant)
@@ -104,9 +104,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     const int H = in.height;
 
     // --- Step 2: normalize CFA into the working copy: (raw - black) / (white - black)
-    // Highlight recon (step 3) and per-site WB (step 4) run as separate passes: recon
-    // must see the normalized-but-un-WB'd CFA so clipped sensels aren't amplified by
-    // per-channel WB before reconstruction. range<=0 zeroes all sites (degenerate guard).
+    // range<=0 zeroes all sites (degenerate guard).
     const float black = in.blackLevel;
     const float range = in.whiteLevel - in.blackLevel;
     const float invRange = (range > 0.0f) ? (1.0f / range) : 0.0f;
@@ -116,21 +114,8 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         workingCfa[i] = (in.cfaMosaic[i] - black) * invRange;
     }
 
-    // --- Step 3: inpaint-opposed highlight reconstruction (design §2.3 step 4) ---
-    // Reconstructs clipped sensels from opposing-channel neighborhood means in linear
-    // sensor space, BEFORE white balance. Without this, fully-clipped sensels become
-    // (wb_R, 1, wb_B) after per-channel WB — an out-of-distribution magenta input the
-    // model handles poorly (it was trained on non-clipped data). No-op for well-exposed
-    // images (early-exit on !anyClipped inside).
-    reconstructHighlightsOpposed(workingCfa.data(), W, H, phase, kNnHighlightClipFactor);
-
-    // --- Step 3b: segmentation-based reconstruction for fully-clipped regions ---
-    // Opposed is a no-op where all 3 channels are clipped (max() can't lower).
-    // segbased recovers texture via segmentation + candidate selection + gradient
-    // propagation. No-op (early-exit) when there aren't enough clipped sensels.
-    reconstructHighlightsSegmentBased(workingCfa.data(), W, H, phase, kNnHighlightClipFactor);
-
-    // --- Step 4: per-site white balance ---
+    // --- Step 3: per-site white balance (before recon — darktable pipeline order:
+    // rawprepare → temperature/WB → highlights → demosaic).
     // After phase-align mirror-pad by (dy,dx), original pixel (y,x) lands at canonical
     // position (y+dy, x+dx), so its WB channel is the canonical color at that position.
     for (int y = 0; y < H; ++y) {
@@ -140,6 +125,17 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
             workingCfa[rowBase + x] *= in.wbRgb[ch];
         }
     }
+
+    // --- Step 4: highlight reconstruction (post-WB, darktable-faithful position).
+    // Per-channel clips scale with WB (clips[c] = clipFactor × wbRgb[c]). No-op for
+    // well-exposed images (early-exit inside). Reconstructs before the NN model sees
+    // the data, so the model never receives out-of-distribution clipped input.
+    reconstructHighlightsOpposed(workingCfa.data(), W, H, phase, kNnHighlightClipFactor, in.wbRgb);
+
+    // --- Step 4b: segmentation-based full-clip recovery (post-WB).
+    // Opposed is a no-op where all 3 channels are clipped; segbased recovers texture
+    // via gradient propagation. No-op when there aren't enough fully-clipped sensels.
+    reconstructHighlightsSegmentBased(workingCfa.data(), W, H, phase, kNnHighlightClipFactor, in.wbRgb);
 
     // --- Step 5: mirror-pad to phase-aligned origin + integer tile grid ---
     const int alignedH = H + phase.dy;  // after top mirror-pad

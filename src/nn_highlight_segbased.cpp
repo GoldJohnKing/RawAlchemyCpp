@@ -163,7 +163,8 @@ void masksExtendBorder(float* mask, int width, int height, int border) {
 } // namespace
 
 bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
-                                       const CfaPhase& phase, float clipFactor) {
+                                       const CfaPhase& phase, float clipFactor,
+                                       const float wbRgb[3]) {
     std::vector<uint8_t> fc((size_t)W * H);
     for (int y = 0; y < H; ++y) {
         const size_t rb = (size_t)y * W;
@@ -171,7 +172,9 @@ bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
             fc[rb + x] = (uint8_t)canonicalCfaColor(y + phase.dy, x + phase.dx, phase);
     }
 
-    const float cubeClipval = std::cbrt(clipFactor);
+    const float cubeClipval[3] = {
+        std::cbrt(clipFactor * wbRgb[0]), std::cbrt(clipFactor * wbRgb[1]), std::cbrt(clipFactor * wbRgb[2])
+    };
     const int xshifter = (!phase.isXtrans && fc[0] == 1) ? 1 : 2;
 
     const int pwidth = (int)roundUp2(W / 3) + 2 * HL_BORDER;
@@ -217,7 +220,7 @@ bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
             for (int c = 0; c < 3; ++c) {
                 mean[c] = (cnt[c] > 0.0f) ? std::cbrt(mean[c] / cnt[c]) : 0.0f;
                 plane[c][o] = mean[c];
-                if (mean[c] > cubeClipval) ++allclipped;
+                if (mean[c] > cubeClipval[c]) ++allclipped;
             }
             segall.data[o] = (allclipped == 3) ? 1u : 0u;
             if (allclipped == 3) hasAllClipped = true;
@@ -237,7 +240,7 @@ bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
     for (int row = segall.border; row < pheight - segall.border; ++row) {
         for (int col = segall.border; col < pwidth - segall.border; ++col) {
             const size_t i = (size_t)row * pwidth + col;
-            planeTmp[i] = (plane[0][i] + plane[1][i] + plane[2][i]) / 3.0f;  // icoeffs={1,1,1}
+            planeTmp[i] = (plane[0][i] * wbRgb[0] + plane[1][i] * wbRgb[1] + plane[2][i] * wbRgb[2]) / 3.0f;
             distance[i] = (segall.data[i] == 1u) ? kDtMax : 0.0f;
         }
     }
@@ -264,11 +267,13 @@ bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
 
     // Commit recovery: add propagated texture to clipped sensels, in-place.
     const float dshift = 2.0f + (float)kRecoveryClose;
+    const float clips[3] = { clipFactor * wbRgb[0], clipFactor * wbRgb[1], clipFactor * wbRgb[2] };
     for (int row = 1; row < H - 1; ++row) {
         const size_t rb = (size_t)row * W;
         for (int col = 1; col < W - 1; ++col) {
             const size_t idx = rb + col;
-            if (std::max(0.0f, cfa[idx]) <= clipFactor) continue;
+            const int c = fc[idx];
+            if (std::max(0.0f, cfa[idx]) <= clips[c]) continue;
             const size_t o = rawToPlane(pwidth, row, col);
             const float effect = kStrength / (1.0f + std::exp(-(distance[o] - dshift)));
             cfa[idx] += std::max(0.0f, gradient[o] * effect);

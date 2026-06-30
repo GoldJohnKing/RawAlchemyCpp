@@ -3,7 +3,7 @@
 // Ties together the ORT session (nn_session), preprocessing (nn_preprocess),
 // postprocessing (nn_postprocess) and the NaN guard (nn_nan_guard) into one
 // pipeline that runs on a CFA mosaic:
-//   normalize -> highlight recon -> per-site WB -> phase-align/mirror-pad -> tile -> infer (ORT)
+//   normalize -> per-site WB -> highlight recon -> phase-align/mirror-pad -> tile -> infer (ORT)
 //   -> trapezoid blend -> hand off accumulators (caller crops, normalizes,
 //      applies color matrix + flip).
 // Algorithm: see docs/nn-demosaic-design.md §2.3-§2.4.

@@ -15,10 +15,11 @@
 namespace rawalchemy {
 
 /** Recover texture in fully-clipped CFA regions via gradient propagation.
- *  In-place on `cfa`. No-op (returns false) when there aren't enough all-clipped
- *  sensels to bother. Only handles regions where ALL 3 channels are clipped —
- *  partial clips are left to inpaint-opposed. */
+ *  In-place on `cfa` (WB-applied). No-op (returns false) when there aren't enough
+ *  all-clipped sensels to bother. Only handles regions where ALL 3 channels are
+ *  clipped — partial clips are left to inpaint-opposed. */
 bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
-                                       const CfaPhase& phase, float clipFactor);
+                                       const CfaPhase& phase, float clipFactor,
+                                       const float wbRgb[3]);
 
 } // namespace rawalchemy
