@@ -29,6 +29,7 @@
 #include "nn_postprocess.h"
 #include "nn_preprocess.h"
 #include "nn_highlight_recon.h"
+#include "nn_highlight_segbased.h"
 #include "nn_session.h"
 
 #include <onnxruntime_cxx_api.h>  // Ort::Session, Ort::Value, Ort::Run
@@ -122,6 +123,12 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     // model handles poorly (it was trained on non-clipped data). No-op for well-exposed
     // images (early-exit on !anyClipped inside).
     reconstructHighlightsOpposed(workingCfa.data(), W, H, phase, kNnHighlightClipFactor);
+
+    // --- Step 3b: segmentation-based reconstruction for fully-clipped regions ---
+    // Opposed is a no-op where all 3 channels are clipped (max() can't lower).
+    // segbased recovers texture via segmentation + candidate selection + gradient
+    // propagation. No-op (early-exit) when there aren't enough clipped sensels.
+    reconstructHighlightsSegmentBased(workingCfa.data(), W, H, phase, kNnHighlightClipFactor);
 
     // --- Step 4: per-site white balance ---
     // After phase-align mirror-pad by (dy,dx), original pixel (y,x) lands at canonical

@@ -465,6 +465,9 @@ set(RA_LIBRARY_SOURCES
     src/nn_nan_guard.cpp
     src/nn_preprocess.cpp
     src/nn_highlight_recon.cpp
+    src/nn_highlight_segbased.cpp
+    src/nn_segmentation.cpp
+    src/nn_image_primitives.cpp
     src/nn_postprocess.cpp
     src/nn_session.cpp
     src/demosaic_nn_xveon.cpp
@@ -688,7 +691,7 @@ endif()
 # above; these overrides restore strict FP for just these TUs.
 # clang-cl (Windows) requires the /clang: forwarding prefix, same as RA_CORE_FASTMATH
 # above (see comment at line 625-628): bare -fno-fast-math is silently ignored.
-set(_RA_STRICT_FP_TUS src/nn_nan_guard.cpp src/nn_highlight_recon.cpp)
+set(_RA_STRICT_FP_TUS src/nn_nan_guard.cpp src/nn_highlight_recon.cpp src/nn_highlight_segbased.cpp src/nn_segmentation.cpp src/nn_image_primitives.cpp)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     set_source_files_properties(${_RA_STRICT_FP_TUS} PROPERTIES
         COMPILE_OPTIONS "/clang:-fno-fast-math"
