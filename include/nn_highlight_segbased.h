@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Segmentation-based highlight reconstruction for fully-clipped CFA regions.
-// Faithful port of darktable src/iop/hlreconstruct/segbased.c (_process_segmentation,
-// by Hanno Schwalm, Iain, garagecoder). Runs AFTER inpaint-opposed on the same CFA:
-// opposed handles partially-clipped sensels; this reconstructs texture/color in
-// regions where ALL channels are clipped (sky blowouts, specular blobs) via
-// segmentation + candidate selection + gradient propagation.
+// Slimmed port of darktable's segbased.c — keeps ONLY the full-clip recovery path
+// (step h). The partial-clip candidate reconstruction (step g) was removed because
+// inpaint-opposed already handles partial clips; running both was redundant.
 //
-// Defaults (darktable-equivalent, tunable later): strength=1.0, adaptive recovery,
-// no noise injection. Runs single-threaded (one-time per image; tile inference
-// dominates). Pre-WB (correction={1,1,1}, uniform clips) — same pipeline position
-// as inpaint-opposed.
+// What remains: build 1/3-res color planes → detect all-clipped superpixels →
+// segment them → distance-transform → propagate boundary gradients inward →
+// box-blur ridge suppression → add recovered texture to clipped sensels.
+// Faithful to darktable's _process_segmentation recovery path (segbased.c:621-700).
 #pragma once
 
 #include "nn_preprocess.h"  // CfaPhase
 
 namespace rawalchemy {
 
-/** Reconstruct fully-clipped CFA sensels via segmentation-based recovery.
- *  In-place on `cfa` ([W*H] float, normalized [0,1], pre-WB). Returns true if any
- *  reconstruction was performed, false on early-exit (insufficient clipped sensels). */
+/** Recover texture in fully-clipped CFA regions via gradient propagation.
+ *  In-place on `cfa`. No-op (returns false) when there aren't enough all-clipped
+ *  sensels to bother. Only handles regions where ALL 3 channels are clipped —
+ *  partial clips are left to inpaint-opposed. */
 bool reconstructHighlightsSegmentBased(float* cfa, int W, int H,
                                        const CfaPhase& phase, float clipFactor);
 

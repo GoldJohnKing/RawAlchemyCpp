@@ -83,18 +83,10 @@ void applyGradingFused(ImageBuffer& img, const GradingParams& params) {
 
         if (doBoost) {
             float lum = Lr * r + Lg * g + Lb * b;
-            // Taper the saturation boost toward 1.0 in the highlight region so grading
-            // doesn't re-amplify chroma that desaturateHighlightsLinear (raw_decoder.cpp)
-            // just suppressed. Without this, the ×1.25 boost partially undoes the
-            // desaturation and re-exposes residual chroma at highlight edges — the pink
-            // rim. sat ramps sat→1.0 over luma [0.5, 0.9], keeping midtone punch while
-            // leaving highlights desaturated. Complements the Gaussian desat's broad reach.
-            float effSat = sat;
-            if (lum > 0.5f) {
-                float taper = (lum - 0.5f) * 2.5f;   // 0 at lum=0.5, 1 at lum=0.9
-                if (taper > 1.0f) taper = 1.0f;
-                effSat = sat + (1.0f - sat) * taper;  // interpolates sat → 1.0
-            }
+            // Luma-tapered saturation — TEMPORARILY DISABLED for A/B testing.
+            // Was: taper sat→1.0 over luma [0.5, 0.9] to prevent re-amplifying
+            // highlight chroma. Re-enable if output-side desaturation is restored.
+            const float effSat = sat;
             float rs = lum + (r - lum) * effSat;
             float gs = lum + (g - lum) * effSat;
             float bs = lum + (b - lum) * effSat;
