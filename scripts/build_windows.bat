@@ -18,8 +18,9 @@ REM an explicit .def file — .def processing is object-format-independent, so i
 REM keeps ThinLTO working while pinning the export surface to the C API.
 REM
 REM Usage:
-REM   build_windows.bat          -- builds DLL (Release)
-REM   build_windows.bat Debug    -- builds DLL (Debug)
+REM   build_windows.bat                 -- builds DLL (Release, neural)
+REM   build_windows.bat Debug           -- builds DLL (Debug)
+REM   build_windows.bat Release legacy  -- builds DLL (Release, legacy — no NN)
 
 setlocal enableextensions
 
@@ -33,7 +34,21 @@ if /I not "%BUILD_TYPE%"=="Debug" if /I not "%BUILD_TYPE%"=="Release" (
     exit /b 1
 )
 
+set "VARIANT=neural"
+if not "%~2"=="" set "VARIANT=%~2"
+
+REM Validate VARIANT: neural builds the NN-linked DLL, legacy omits NN linkage.
+if /I not "%VARIANT%"=="neural" if /I not "%VARIANT%"=="legacy" (
+    echo ERROR: VARIANT must be neural or legacy, got "%VARIANT%".
+    exit /b 1
+)
+
 set "BUILD_DIR=build-windows-dll"
+set "NN_FLAG=ON"
+if /I "%VARIANT%"=="legacy" (
+    set "BUILD_DIR=build-windows-dll-legacy"
+    set "NN_FLAG=OFF"
+)
 
 REM Locate the latest Visual Studio installation via vswhere (bundled with VS Installer).
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -51,7 +66,7 @@ REM and put the VS-bundled Ninja on PATH.
 call "%VS_INSTALL%\VC\Auxiliary\Build\vcvars64.bat" >nul
 set "PATH=%VS_INSTALL%\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja;%PATH%"
 
-echo === Building Raw Alchemy Shared Library with clang-cl (%BUILD_TYPE%) ===
+echo === Building Raw Alchemy Shared Library with clang-cl (%BUILD_TYPE%, %VARIANT%) ===
 
 REM BUILD_CLI=OFF matches the Android FFI build and keeps the DLL surface to the
 REM C API only (see CMakeLists.txt for the LTO / .def export details). CMake
@@ -63,7 +78,8 @@ cmake -B "%BUILD_DIR%" -G Ninja ^
     -DCMAKE_BUILD_TYPE=%BUILD_TYPE% ^
     -DBUILD_SHARED=ON ^
     -DBUILD_CAPI=ON ^
-    -DBUILD_CLI=OFF
+    -DBUILD_CLI=OFF ^
+    -DRA_ENABLE_NN_DEMOSAIC=%NN_FLAG%
 
 if %ERRORLEVEL% neq 0 (
     echo ERROR: CMake configuration failed.

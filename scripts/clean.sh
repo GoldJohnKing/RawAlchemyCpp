@@ -2,7 +2,7 @@
 # Clean all RawAlchemyCpp build artifacts.
 #
 # Removes the build directories declared in the project .gitignore:
-#   build/, build-windows-dll/, build-android-*/, cmake-build-*/
+#   build/, build-windows-dll*/ (incl. build-windows-dll-legacy), build-android-*/, cmake-build-*/
 #
 # The patterns mirror .gitignore so this stays in sync as build variants evolve;
 # keep the two lists aligned when adding new build directories.
@@ -22,7 +22,7 @@ cd "$PROJECT_DIR"
 
 removed=0
 failed=0
-for pattern in build build-windows-dll build-android-* cmake-build-*; do
+for pattern in build build-windows-dll* build-android-* cmake-build-*; do
     # Non-matching globs expand to the literal pattern; skip those.
     [ -d "$pattern" ] || continue
     if rm -rf "$pattern" 2>/dev/null; then
