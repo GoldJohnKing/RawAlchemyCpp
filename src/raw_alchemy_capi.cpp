@@ -6,6 +6,7 @@
 #include "raw_alchemy_capi.h"
 
 #include "nn_session.h"
+#include "nn_logging.h"
 #include "raw_decoder.h"
 #include "metering.h"
 #include "tiff_writer.h"
@@ -19,6 +20,7 @@
 #include <libraw/libraw.h>
 #include <cstring>
 #include <cstdlib>
+#include <mutex>
 #include <string>
 #include <stdexcept>
 
@@ -28,6 +30,24 @@
 namespace {
 
 thread_local std::string g_lastError;
+
+// ----------------------------------------------------------------
+//  NN runtime config store (explicit C-ABI transport — replaces RA_NN_* env
+//  vars, which are invisible to MSVC std::getenv on Windows due to
+//  CRT/Win32 environment desync). Last-call-wins under a mutex; all strings
+//  are deep-copied on ra_set_nn_config so the caller may free immediately.
+// ----------------------------------------------------------------
+struct NnRuntimeConfig {
+    std::mutex m;
+    std::string bayer;
+    std::string xtrans;
+    std::string directml;
+    std::string socModel;
+    std::string htpArch;
+    std::string ctxDir;
+    std::string appVersion;
+};
+NnRuntimeConfig g_nnConfig;
 
 void setError(const std::string& msg) {
     g_lastError = msg;
@@ -50,6 +70,21 @@ RaResult catchExceptions(const char* context) {
         setError(std::string(context) + ": unknown error");
         return RA_ERR_UNKNOWN;
     }
+}
+
+/// Copy the 7 NN config fields from g_nnConfig into DecodeParams, under the
+/// config mutex. Replaces the per-call-site RA_NN_* env reads so the NN path
+/// works on Windows (env vars set by the Rust host are invisible to MSVC
+/// std::getenv — CRT/Win32 desync).
+void applyNnConfig(rawalchemy::DecodeParams& params) {
+    std::lock_guard<std::mutex> lk(g_nnConfig.m);
+    params.nnBayerModelPath = g_nnConfig.bayer;
+    params.nnXtransModelPath = g_nnConfig.xtrans;
+    params.nnDirectmlDllPath = g_nnConfig.directml;
+    params.nnSocModel = g_nnConfig.socModel;
+    params.nnHtpArch = g_nnConfig.htpArch;
+    params.nnCtxDir = g_nnConfig.ctxDir;
+    params.nnAppVersion = g_nnConfig.appVersion;
 }
 
 } // anonymous namespace
@@ -345,18 +380,10 @@ RA_API RaResult RA_CALL raProcessFile(
         // Decode (with optional EXIF collection)
         rawalchemy::DecodeParams params;
         params.enableNnDemosaic = (enableNnDemosaic != 0);
-        // NN model paths: populated by caller via env or set globally (Task 7).
-        // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
-        if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
-        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
-        // DirectML.dll path (Windows). Set by the Rust host to the extraction
-        // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
-        // app-local DirectML.dll (defense-in-depth on top of the host preload).
-        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
-        if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
-        if (const char* p = std::getenv("RA_NN_HTP_ARCH")) params.nnHtpArch = p;
-        if (const char* p = std::getenv("RA_NN_CTX_DIR")) params.nnCtxDir = p;
-        if (const char* p = std::getenv("RA_NN_APP_VERSION")) params.nnAppVersion = p;
+        // NN model paths + QNN config are injected by the Rust host via
+        // ra_set_nn_config (explicit C-ABI transport — env vars are invisible
+        // to MSVC std::getenv on Windows due to CRT/Win32 environment desync).
+        applyNnConfig(params);
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
 
         // Metadata (for lens correction)
@@ -431,18 +458,8 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
 
         rawalchemy::DecodeParams params;
         params.enableNnDemosaic = (enableNnDemosaic != 0);
-        // NN model paths: populated by caller via env or set globally (Task 7).
-        // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
-        if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
-        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
-        // DirectML.dll path (Windows). Set by the Rust host to the extraction
-        // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
-        // app-local DirectML.dll (defense-in-depth on top of the host preload).
-        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
-        if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
-        if (const char* p = std::getenv("RA_NN_HTP_ARCH")) params.nnHtpArch = p;
-        if (const char* p = std::getenv("RA_NN_CTX_DIR")) params.nnCtxDir = p;
-        if (const char* p = std::getenv("RA_NN_APP_VERSION")) params.nnAppVersion = p;
+        // NN config injected via ra_set_nn_config — see raProcessFile.
+        applyNnConfig(params);
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
@@ -520,18 +537,8 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         // Decode
         rawalchemy::DecodeParams params;
         params.enableNnDemosaic = (enableNnDemosaic != 0);
-        // NN model paths: populated by caller via env or set globally (Task 7).
-        // For now, read from env vars RA_NN_BAYER_MODEL / RA_NN_XTRANS_MODEL.
-        if (const char* p = std::getenv("RA_NN_BAYER_MODEL")) params.nnBayerModelPath = p;
-        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) params.nnXtransModelPath = p;
-        // DirectML.dll path (Windows). Set by the Rust host to the extraction
-        // dir so nn_session.cpp's SetDllDirectoryA steers ORT's DML EP to our
-        // app-local DirectML.dll (defense-in-depth on top of the host preload).
-        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) params.nnDirectmlDllPath = p;
-        if (const char* p = std::getenv("RA_NN_SOC_MODEL")) params.nnSocModel = p;
-        if (const char* p = std::getenv("RA_NN_HTP_ARCH")) params.nnHtpArch = p;
-        if (const char* p = std::getenv("RA_NN_CTX_DIR")) params.nnCtxDir = p;
-        if (const char* p = std::getenv("RA_NN_APP_VERSION")) params.nnAppVersion = p;
+        // NN config injected via ra_set_nn_config — see raProcessFile.
+        applyNnConfig(params);
         auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
 
         // Metadata (for lens correction)
@@ -550,6 +557,35 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     }
 }
 
+// ----------------------------------------------------------------
+//  NN runtime config (explicit C-ABI transport — replaces RA_NN_* env vars)
+// ----------------------------------------------------------------
+
+RA_API RaResult RA_CALL ra_set_nn_config(const RaNnConfig* cfg) {
+    // NULL config is a no-op (leave whatever was previously set).
+    if (!cfg) return RA_OK;
+    try {
+        std::lock_guard<std::mutex> lk(g_nnConfig.m);
+        // Deep-copy every field so the caller may free its strings immediately
+        // after this returns. NULL fields → empty string (unset / N/A).
+        g_nnConfig.bayer     = cfg->bayer_model_path  ? std::string(cfg->bayer_model_path)  : std::string{};
+        g_nnConfig.xtrans    = cfg->xtrans_model_path ? std::string(cfg->xtrans_model_path) : std::string{};
+        g_nnConfig.directml  = cfg->directml_dll_path ? std::string(cfg->directml_dll_path) : std::string{};
+        g_nnConfig.socModel  = cfg->soc_model         ? std::string(cfg->soc_model)         : std::string{};
+        g_nnConfig.htpArch   = cfg->htp_arch          ? std::string(cfg->htp_arch)          : std::string{};
+        g_nnConfig.ctxDir    = cfg->ctx_dir           ? std::string(cfg->ctx_dir)           : std::string{};
+        g_nnConfig.appVersion = cfg->app_version      ? std::string(cfg->app_version)       : std::string{};
+    } catch (const std::bad_alloc&) {
+        return RA_ERR_OUT_OF_MEMORY;
+    }
+    return RA_OK;
+}
+
+RA_API void RA_CALL ra_set_log_file(const char* path) {
+    // Forward to the header-only nnlog store (NULL → revert to stderr).
+    nnlog::set_log_file(path);
+}
+
 #ifdef RA_ENABLE_NN_DEMOSAIC
 // ----------------------------------------------------------------
 //  NN session warmup
@@ -561,15 +597,39 @@ RA_API void RA_CALL raWarmupNnSession(void) {
     // an exception escape into the async runtime.
     try {
         rawalchemy::NnSessionConfig cfg;
-        if (const char* p = std::getenv("RA_NN_BAYER_MODEL"))  cfg.bayerModelPath  = p;
-        if (const char* p = std::getenv("RA_NN_XTRANS_MODEL")) cfg.xtransModelPath = p;
+        // Read config set via ra_set_nn_config (explicit C-ABI transport — env
+        // vars are invisible to MSVC std::getenv on Windows). Platform-specific
+        // fields are read under the same #ifdef guards as the original getenv
+        // block. The socModel "0" default matches the old behavior:
+        // (p && *p) ? p : "0".
+        std::string bayer, xtrans;
 #ifdef _WIN32
-        if (const char* p = std::getenv("RA_NN_DIRECTML_DLL")) cfg.directmlDllPath = p;
+        std::string directml;
 #elif defined(__ANDROID__)
-        if (const char* p = std::getenv("RA_NN_SOC_MODEL"))   cfg.socModel   = (p && *p) ? std::string(p) : std::string("0");
-        if (const char* p = std::getenv("RA_NN_HTP_ARCH"))    cfg.htpArch    = (p ? std::string(p) : std::string());
-        if (const char* p = std::getenv("RA_NN_CTX_DIR"))     cfg.ctxDir     = (p ? std::string(p) : std::string());
-        if (const char* p = std::getenv("RA_NN_APP_VERSION")) cfg.appVersion = (p ? std::string(p) : std::string());
+        std::string socModel, htpArch, ctxDir, appVersion;
+#endif
+        {
+            std::lock_guard<std::mutex> lk(g_nnConfig.m);
+            bayer = g_nnConfig.bayer;
+            xtrans = g_nnConfig.xtrans;
+#ifdef _WIN32
+            directml = g_nnConfig.directml;
+#elif defined(__ANDROID__)
+            socModel = g_nnConfig.socModel;
+            htpArch = g_nnConfig.htpArch;
+            ctxDir = g_nnConfig.ctxDir;
+            appVersion = g_nnConfig.appVersion;
+#endif
+        }
+        cfg.bayerModelPath = bayer;
+        cfg.xtransModelPath = xtrans;
+#ifdef _WIN32
+        cfg.directmlDllPath = directml;
+#elif defined(__ANDROID__)
+        cfg.socModel = !socModel.empty() ? socModel : std::string("0");
+        cfg.htpArch = htpArch;
+        cfg.ctxDir = ctxDir;
+        cfg.appVersion = appVersion;
 #endif
         // Best-effort: init() returns false on failure (never throws). The edit
         // path will re-attempt via decodeRawNn if this background call didn't

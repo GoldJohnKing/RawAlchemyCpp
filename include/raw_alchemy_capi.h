@@ -175,8 +175,8 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     int         enableNnDemosaic
 );
 
-/** Eagerly initialize the NN demosaic session in the background. Reads the same
- *  RA_NN_* env vars as raProcessFile* and calls NnDemosaicSession::init().
+/** Eagerly initialize the NN demosaic session in the background. Reads the
+ *  config set via ra_set_nn_config and calls NnDemosaicSession::init().
  *  Best-effort: any failure is logged and swallowed (init() itself never throws
  *  after the thread-safety fix); the edit path will re-attempt if this didn't
  *  succeed. Intended to be called from a background thread at app launch so the
@@ -189,6 +189,49 @@ RA_API void RA_CALL raWarmupNnSession(void);
  *  session) from a per-file NN error on a ready session (fall back for this
  *  file only, no latch). */
 RA_API bool RA_CALL raIsNnReady(void);
+
+/* ----------------------------------------------------------------
+ *  NN Runtime Configuration (explicit C-ABI transport)
+ *
+ *  Replaces the legacy RA_NN_* environment-variable transport. Rust's
+ *  std::env::set_var calls SetEnvironmentVariableW, which is invisible to
+ *  MSVC's std::getenv (CRT/Win32 environment desync), so on Windows all NN
+ *  config read as NULL. These explicit setters carry the config through a
+ *  stable C struct instead, with the implementation deep-copying every
+ *  non-NULL string so the caller may free immediately after the call.
+ * ---------------------------------------------------------------- */
+
+/* NN runtime config. All fields are UTF-8 strings and individually nullable
+ * (NULL = unset / N/A for this platform). Field semantics:
+ *   bayer_model_path  — bayer.onnx abs path (all platforms)
+ *   xtrans_model_path — xtrans.onnx abs path (all platforms)
+ *   directml_dll_path — DirectML.dll path; parent dir → SetDllDirectoryA (Windows only)
+ *   soc_model         — QNN numeric SoC model, e.g. "43" for SM8550 (Android only)
+ *   htp_arch          — QNN Hexagon arch, e.g. "73" (Android only)
+ *   ctx_dir           — QNN context-cache dir (Android only)
+ *   app_version       — embedded in the context-cache filename (Android)
+ */
+typedef struct RaNnConfig {
+    const char* bayer_model_path;
+    const char* xtrans_model_path;
+    const char* directml_dll_path;
+    const char* soc_model;
+    const char* htp_arch;
+    const char* ctx_dir;
+    const char* app_version;
+} RaNnConfig;
+
+/** Set the NN runtime config. Deep-copies every non-NULL field under a mutex
+ *  (last-call-wins). Safe to pass NULL (no-op, returns RA_OK). Caller may free
+ *  the strings immediately after this returns.
+ *  @return RA_OK, or RA_ERR_OUT_OF_MEMORY if a string copy throws bad_alloc. */
+RA_API RaResult RA_CALL ra_set_nn_config(const RaNnConfig* cfg);
+
+/** Redirect C++ NN diagnostics (nnlog::info) to `path` (opened in append mode).
+ *  Pass NULL to revert to stderr. Deep-copies the path under a mutex. The
+ *  nnlog fallback is: if the path is unset or the file can't be opened, write
+ *  to stderr instead. */
+RA_API void RA_CALL ra_set_log_file(const char* path);
 
 /* ----------------------------------------------------------------
  *  Preview Session — two-phase preview pipeline
