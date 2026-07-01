@@ -35,6 +35,7 @@
 #include <onnxruntime_cxx_api.h>  // Ort::Session, Ort::Value, Ort::Run
 #include <chrono>
 #include <cstring>
+#include <mutex>
 
 #include <algorithm>
 #include <array>
@@ -196,6 +197,14 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
     // diagnostic logging; correctness does not depend on the exact totals.
     std::atomic<long long> totalInferenceMs{0};
     std::atomic<size_t> tileCount{0};
+#ifdef _WIN32
+    // The DirectML EP crashes (0xc0000005 in onnxruntime.dll) when Session::Run
+    // is invoked concurrently from multiple OpenMP worker threads. Serialize Run
+    // on Windows only — the QNN (Android) and CPU (Linux) EPs tolerate concurrent
+    // Run, and DML's GPU command queue serializes execution internally anyway, so
+    // host-side serialization is near-free for GPU inference.
+    static std::mutex dmlRunMutex;
+#endif
 #ifdef RA_USE_OPENMP
     #pragma omp parallel
 #endif
@@ -237,6 +246,9 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
                 std::vector<Ort::Value> outputs;
                 auto _t0 = std::chrono::high_resolution_clock::now();
                 try {
+#ifdef _WIN32
+                    std::lock_guard<std::mutex> runLock(dmlRunMutex);
+#endif
                     outputs = ort->Run(Ort::RunOptions{nullptr},
                                        inNames, &inTensor, 1, outNames, 1);
                 } catch (const Ort::Exception&) {
