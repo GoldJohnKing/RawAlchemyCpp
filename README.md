@@ -10,9 +10,24 @@ A high-performance C++ library and command-line tool for processing camera RAW f
 
 ## 致谢 / Acknowledgments
 
+### 参考项目 / Reference Project
+
 本项目的核心设计、处理管线、色彩科学算法以及测光策略均源自 [Raw-Alchemy](https://github.com/shenmintao/Raw-Alchemy) 项目。感谢原作者的设计与实现，使得本 C++ 移植版本得以完成。
 
 The core design, processing pipeline, color science algorithms, and metering strategies are all derived from the [Raw-Alchemy](https://github.com/shenmintao/Raw-Alchemy) project. Credit goes to the original author for the architecture that made this C++ port possible.
+
+### 算法移植 / Algorithm Ports
+
+- **[darktable](https://github.com/darktable-org/darktable)**（GPL-3.0）：X-Trans Markesteijn 与 RCD 去马赛克算法、X-Trans 小波降噪算法忠实移植自 darktable。涉及源文件 `src/demosaic_markesteijn.cpp`、`src/demosaic_rcd.cpp`、`src/denoise_xtrans.cpp`；相对 darktable 上游的算法偏差均逐条记录于各源文件头部。
+- The X-Trans Markesteijn / RCD demosaic algorithms and the X-Trans wavelet denoise routine are faithful ports from **[darktable](https://github.com/darktable-org/darktable)** (GPL-3.0). Deviations from the upstream darktable source are documented at the head of each ported file (`src/demosaic_markesteijn.cpp`, `src/demosaic_rcd.cpp`, `src/denoise_xtrans.cpp`).
+
+### 神经网络模型 / Neural Demosaic Models
+
+- 神经网络去马赛克管线（`NnDemosaicSession`）所用的预训练 ONNX 权重（Bayer 与 X-Trans）源自 **[x-veon](https://github.com/naorunaoru/x-veon)**（作者 naorunaoru）。C++ 核心通过 `ra_set_nn_model` 从宿主注入的内存字节加载权重，本仓库不自带模型文件。
+- The pre-trained ONNX weights (Bayer and X-Trans) consumed by the neural demosaic pipeline (`NnDemosaicSession`) originate from **[x-veon](https://github.com/naorunaoru/x-veon)** by naorunaoru. The C++ core loads them from host-injected in-memory bytes via `ra_set_nn_model`; no model files are bundled in this repository.
+
+> ⚠️ **许可证 / License**：上游 `x-veon` 仓库**未附带 LICENSE 文件**，也未声明许可证。这些权重目前由宿主应用以评估/集成为目的 vendored，**在许可证明确前请勿二次分发**。
+> The upstream `x-veon` repository ships **no LICENSE file**. Its weights are vendored by the host application for evaluation/integration pending a license determination; do **not** redistribute them until the license is confirmed.
 
 ---
 
@@ -295,6 +310,8 @@ RawAlchemyCpp/
 | [pugixml](https://pugixml.org/) | XML 解析 (供 GLib2 shim 使用) |
 
 **可选**：OpenMP（自动检测，用于像素级操作的并行加速）。
+
+**神经网络去马赛克**（可选，由 CMake 选项 `RA_ENABLE_NN_DEMOSAIC` 控制，默认开启）：依赖 [ONNX Runtime](https://onnxruntime.ai/)。ORT 二进制（Windows 走 DirectML EP、Android 走 Qualcomm QNN EP、Linux 走 CPU EP）由宿主应用的 `fetch-nn-deps.sh` 拉取到 `third_party/nn-cache/`，编译时由 CMake 链接；所用 ONNX 模型权重源自 [x-veon](https://github.com/naorunaoru/x-veon)（详见上文「致谢」）。
 
 **色彩数据生成**（可选）：`color_data.h` 已包含在仓库中。仅在需要修改色彩空间定义时，才需安装 Python 3 + `colour-science` 并运行 `scripts/gen_color_data.py` 重新生成。普通构建不需要 Python 环境。
 
