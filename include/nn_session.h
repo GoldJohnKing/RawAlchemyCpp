@@ -13,9 +13,11 @@
 // The only Ort:: type that appears here is Session, as an opaque pointer return.
 #pragma once
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 // Forward-declared only — the complete definitions live in nn_session.cpp, which
 // is the sole TU that pulls in the ORT C++ wrapper. This keeps the ORT headers
@@ -31,11 +33,15 @@ namespace rawalchemy {
 static constexpr int NN_CFA_PERIOD_BAYER = 2;
 static constexpr int NN_CFA_PERIOD_XTRANS = 6;
 
-/** Configuration for the NN demosaic session singleton. Model paths are UTF-8
- *  (converted to wide on Windows where ORTCHAR_T == wchar_t). */
+/** Configuration for the NN demosaic session singleton. Model weights are passed
+ *  as in-memory ONNX byte buffers (Option D: the host embeds gzip-compressed
+ *  models in its binary, decompresses them, and hands the raw bytes to ORT via
+ *  the in-memory Session ctor — no disk extraction, no file paths). The pointers
+ *  are non-owning and must outlive init(); in practice they point at the
+ *  process-global g_nnConfig vectors set once at startup. */
 struct NnSessionConfig {
-    std::string bayerModelPath;   // bayer.onnx (period-2 CFA model)
-    std::string xtransModelPath;  // xtrans.onnx (period-6 X-Trans model)
+    const std::vector<uint8_t>* bayerModelData = nullptr;   // bayer.onnx (period-2 CFA model)
+    const std::vector<uint8_t>* xtransModelData = nullptr;  // xtrans.onnx (period-6 X-Trans model)
     int intraOpNumThreads = 1;    // ORT intra-op thread pool size (inter-op pinned to 1; see .cpp)
 
 #ifdef _WIN32

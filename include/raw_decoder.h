@@ -14,7 +14,9 @@
 
 #include "common.h"
 #include "demosaic.h"
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace rawalchemy {
 
@@ -86,9 +88,12 @@ struct DecodeParams {
     /// path instead of the classical RCD/Markesteijn kernels. Ignored for halfSize.
     bool enableNnDemosaic = false;
 
-    // Paths populated by the CAPI layer before calling decodeRaw when enableNnDemosaic:
-    std::string nnBayerModelPath;
-    std::string nnXtransModelPath;
+    // NN model weights populated by the CAPI layer before calling decodeRaw when
+    // enableNnDemosaic. Non-owning pointers into the process-global g_nnConfig
+    // (set once via ra_set_nn_model); null = no model (NN degrades to classical).
+    // Option D: bytes, not file paths — ORT loads them from memory.
+    const std::vector<uint8_t>* nnBayerModelData = nullptr;
+    const std::vector<uint8_t>* nnXtransModelData = nullptr;
     std::string nnQnnContextBinaryDir;   // Android only
     std::string nnDirectmlDllPath;       // Windows only
     std::string nnSocModel;  // Android only: QNN "soc_model" numeric string (e.g. "69" for SM8750). "0" = auto-detect.

@@ -337,8 +337,8 @@ static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
     auto& sess = NnDemosaicSession::instance();
     if (!sess.isReady()) {
         NnSessionConfig cfg;
-        cfg.bayerModelPath = params.nnBayerModelPath;
-        cfg.xtransModelPath = params.nnXtransModelPath;
+        cfg.bayerModelData = params.nnBayerModelData;
+        cfg.xtransModelData = params.nnXtransModelData;
 #ifdef _WIN32
         cfg.directmlDllPath = params.nnDirectmlDllPath;
         #elif defined(__ANDROID__)

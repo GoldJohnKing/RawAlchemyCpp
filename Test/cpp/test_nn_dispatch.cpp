@@ -132,9 +132,25 @@ int main() {
     f.seekg(0, std::ios::beg);
     f.read(reinterpret_cast<char*>(fixtureCfa.data()), bytes);
 
+    // Load the bayer model weights into memory (Option D: in-memory ORT load —
+    // the app now passes weights as bytes, never a file path).
+    std::ifstream mf(onnxPath, std::ios::binary | std::ios::ate);
+    if (!mf) {
+        std::cerr << "test_nn_dispatch: cannot open model: " << onnxPath << "\n";
+        return 1;
+    }
+    std::vector<uint8_t> modelBytes(static_cast<size_t>(mf.tellg()));
+    mf.seekg(0, std::ios::beg);
+    if (modelBytes.empty() ||
+        !mf.read(reinterpret_cast<char*>(modelBytes.data()),
+                 static_cast<std::streamsize>(modelBytes.size()))) {
+        std::cerr << "test_nn_dispatch: failed to read model: " << onnxPath << "\n";
+        return 1;
+    }
+
     // Initialize the session with the bayer model (Linux dev-loop: CPU EP).
     NnSessionConfig cfg;
-    cfg.bayerModelPath = onnxPath;
+    cfg.bayerModelData = &modelBytes;
     if (!NnDemosaicSession::instance().init(cfg)) {
         std::cerr << "test_nn_dispatch: NnDemosaicSession::init failed for "
                   << onnxPath << "\n";

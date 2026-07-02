@@ -65,10 +65,14 @@ std::string parentDir(const std::string& path) {
 // Hand-defined because the generic ORT GitHub-release package omits
 // dml_provider_factory.h. Pinned to ORT_API_VERSION; replace with
 // #include <dml_provider_factory.h> once the DirectML-capable onnxruntime
-// package is adopted (Plan B). The real OrtDmlApi has 6 members in 1.24
-// (_DML, _DML1, CreateGPUAllocationFromD3DResource, FreeGPUAllocation,
-// GetD3D12ResourceFromAllocation, _DML2); only slot 0 (_DML, the device_id
-// form) is used here.
+// package is adopted. OrtDmlApi is a VERSIONED struct that GROWS across ORT
+// releases — as of ORT main it has 8 members (_DML, _DML1(Ex),
+// CreateGPUAllocationFromD3DResource, FreeGPUAllocation,
+// GetD3D12ResourceFromAllocation, _DML2, GetDMLDevice, GetDMLCommandQueue).
+// We only ever dereference slot 0 (_DML, the device_id form), whose offset is
+// stable across every version, so this head-subset declaration is ABI-safe
+// regardless of how many trailing members the runtime's struct actually has.
+// Do NOT index beyond slot 0 without re-deriving the full upstream layout.
 struct OrtDmlApi {
     OrtStatus* (*SessionOptionsAppendExecutionProvider_DML)(
         OrtSessionOptions* options, int device_id);
@@ -277,7 +281,7 @@ std::string buildCtxPath(const NnSessionConfig& cfg, const std::string& modelTag
 // or missing ctx dir), behaves as a plain session constructor + (on Android)
 // NPU-engagement verify, exactly like the previous behavior.
 std::unique_ptr<Ort::Session> createSessionWithCache(
-    Ort::Env& env, const std::string& modelPath, const std::string& modelTag,
+    Ort::Env& env, const std::vector<uint8_t>& modelData, const std::string& modelTag,
     const NnSessionConfig& cfg) {
 
 #if defined(__ANDROID__)
@@ -313,14 +317,11 @@ std::unique_ptr<Ort::Session> createSessionWithCache(
                     modelTag.c_str(), ctxPath.c_str());
     }
 #endif
-    std::unique_ptr<Ort::Session> session;
-#ifdef _WIN32
-    // ORTCHAR_T is wchar_t on Windows: widen the UTF-8 model path.
-    std::wstring wide = utf8_to_wide(modelPath);
-    session = std::make_unique<Ort::Session>(env, wide.c_str(), opts);
-#else
-    session = std::make_unique<Ort::Session>(env, modelPath.c_str(), opts);
-#endif
+    // Compile path: feed the in-memory ONNX bytes directly to ORT (Option D — no
+    // disk file, no path). The ctor parses the protobuf into ORT's internal
+    // Model and does not retain `modelData` after construction.
+    auto session = std::make_unique<Ort::Session>(
+        env, modelData.data(), modelData.size(), opts);
 #if defined(__ANDROID__)
     verifyQnnEngaged(*session, modelTag.c_str());
 #endif
@@ -378,11 +379,11 @@ bool NnDemosaicSession::init(const NnSessionConfig& cfg) {
         // the cached QNN context (fast) or compiles+caches (slow once); the cache
         // path skips EP verification (cached context is QNN by construction), the
         // compile path verifies inside. On Windows/Linux this is a plain ctor.
-        if (!cfg.bayerModelPath.empty()) {
-            impl_->bayerSession = createSessionWithCache(impl_->env, cfg.bayerModelPath, "bayer", cfg);
+        if (cfg.bayerModelData && !cfg.bayerModelData->empty()) {
+            impl_->bayerSession = createSessionWithCache(impl_->env, *cfg.bayerModelData, "bayer", cfg);
         }
-        if (!cfg.xtransModelPath.empty()) {
-            impl_->xtransSession = createSessionWithCache(impl_->env, cfg.xtransModelPath, "xtrans", cfg);
+        if (cfg.xtransModelData && !cfg.xtransModelData->empty()) {
+            impl_->xtransSession = createSessionWithCache(impl_->env, *cfg.xtransModelData, "xtrans", cfg);
         }
 
         auto t1 = std::chrono::high_resolution_clock::now();

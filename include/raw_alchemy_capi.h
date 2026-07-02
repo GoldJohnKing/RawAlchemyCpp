@@ -16,6 +16,8 @@
 
 #include "raw_alchemy_export.h"
 
+#include <stddef.h>  // size_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -203,17 +205,18 @@ RA_API bool RA_CALL raIsNnReady(void);
 
 /* NN runtime config. All fields are UTF-8 strings and individually nullable
  * (NULL = unset / N/A for this platform). Field semantics:
- *   bayer_model_path  — bayer.onnx abs path (all platforms)
- *   xtrans_model_path — xtrans.onnx abs path (all platforms)
  *   directml_dll_path — DirectML.dll path; parent dir → SetDllDirectoryA (Windows only)
  *   soc_model         — QNN numeric SoC model, e.g. "43" for SM8550 (Android only)
  *   htp_arch          — QNN Hexagon arch, e.g. "73" (Android only)
  *   ctx_dir           — QNN context-cache dir (Android only)
  *   app_version       — embedded in the context-cache filename (Android)
+ *
+ * Model WEIGHTS are NOT carried here — they are in-memory ONNX byte buffers
+ * supplied via ra_set_nn_model() (Option D: the host embeds gzip-compressed
+ * models in its binary, decompresses them, and hands the bytes to the C++ core,
+ * which feeds them to ORT's in-memory Session ctor — no disk file/path).
  */
 typedef struct RaNnConfig {
-    const char* bayer_model_path;
-    const char* xtrans_model_path;
     const char* directml_dll_path;
     const char* soc_model;
     const char* htp_arch;
@@ -226,6 +229,15 @@ typedef struct RaNnConfig {
  *  the strings immediately after this returns.
  *  @return RA_OK, or RA_ERR_OUT_OF_MEMORY if a string copy throws bad_alloc. */
 RA_API RaResult RA_CALL ra_set_nn_config(const RaNnConfig* cfg);
+
+/* Supply an NN model's ONNX weights as an in-memory byte buffer. `kind` selects
+ * the model: 0 = bayer, 1 = xtrans. `data`/`len` are deep-copied under the NN
+ * config mutex, so the caller may free `data` immediately after this returns.
+ * Replaces the former bayer_model_path / xtrans_model_path config fields
+ * (Option D: ORT loads weights from memory, no on-disk model file). Pass len=0
+ * to clear a model (sets it to "absent"). Best-effort allocation errors return
+ * RA_ERR_OUT_OF_MEMORY; otherwise RA_OK. */
+RA_API RaResult RA_CALL ra_set_nn_model(int kind, const void* data, size_t len);
 
 /** Redirect C++ NN diagnostics (nnlog::info) to `path` (opened in append mode).
  *  Pass NULL to revert to stderr. Deep-copies the path under a mutex. The

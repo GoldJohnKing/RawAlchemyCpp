@@ -20,9 +20,12 @@
 #include <libraw/libraw.h>
 #include <cstring>
 #include <cstdlib>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 // ----------------------------------------------------------------
 //  Thread-local error message storage
@@ -39,8 +42,12 @@ thread_local std::string g_lastError;
 // ----------------------------------------------------------------
 struct NnRuntimeConfig {
     std::mutex m;
-    std::string bayer;
-    std::string xtrans;
+    // Option D: model weights held as in-memory ONNX byte buffers (set once via
+    // ra_set_nn_model). Non-owning pointers into these vectors are handed to
+    // NnSessionConfig / DecodeParams, so the vectors must remain stable for the
+    // process lifetime after ra_set_nn_model (never reassigned post-startup).
+    std::vector<uint8_t> bayerModelData;
+    std::vector<uint8_t> xtransModelData;
     std::string directml;
     std::string socModel;
     std::string htpArch;
@@ -78,8 +85,10 @@ RaResult catchExceptions(const char* context) {
 /// std::getenv — CRT/Win32 desync).
 void applyNnConfig(rawalchemy::DecodeParams& params) {
     std::lock_guard<std::mutex> lk(g_nnConfig.m);
-    params.nnBayerModelPath = g_nnConfig.bayer;
-    params.nnXtransModelPath = g_nnConfig.xtrans;
+    // Hand non-owning pointers into the global model-byte vectors (cheap; the
+    // vectors are stable for the process lifetime after ra_set_nn_model).
+    params.nnBayerModelData = g_nnConfig.bayerModelData.empty() ? nullptr : &g_nnConfig.bayerModelData;
+    params.nnXtransModelData = g_nnConfig.xtransModelData.empty() ? nullptr : &g_nnConfig.xtransModelData;
     params.nnDirectmlDllPath = g_nnConfig.directml;
     params.nnSocModel = g_nnConfig.socModel;
     params.nnHtpArch = g_nnConfig.htpArch;
@@ -568,13 +577,31 @@ RA_API RaResult RA_CALL ra_set_nn_config(const RaNnConfig* cfg) {
         std::lock_guard<std::mutex> lk(g_nnConfig.m);
         // Deep-copy every field so the caller may free its strings immediately
         // after this returns. NULL fields → empty string (unset / N/A).
-        g_nnConfig.bayer     = cfg->bayer_model_path  ? std::string(cfg->bayer_model_path)  : std::string{};
-        g_nnConfig.xtrans    = cfg->xtrans_model_path ? std::string(cfg->xtrans_model_path) : std::string{};
         g_nnConfig.directml  = cfg->directml_dll_path ? std::string(cfg->directml_dll_path) : std::string{};
         g_nnConfig.socModel  = cfg->soc_model         ? std::string(cfg->soc_model)         : std::string{};
         g_nnConfig.htpArch   = cfg->htp_arch          ? std::string(cfg->htp_arch)          : std::string{};
         g_nnConfig.ctxDir    = cfg->ctx_dir           ? std::string(cfg->ctx_dir)           : std::string{};
         g_nnConfig.appVersion = cfg->app_version      ? std::string(cfg->app_version)       : std::string{};
+    } catch (const std::bad_alloc&) {
+        return RA_ERR_OUT_OF_MEMORY;
+    }
+    return RA_OK;
+}
+
+RA_API RaResult RA_CALL ra_set_nn_model(int kind, const void* data, size_t len) {
+    try {
+        std::lock_guard<std::mutex> lk(g_nnConfig.m);
+        std::vector<uint8_t> bytes;
+        if (data && len > 0) {
+            bytes.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + len);
+        }
+        if (kind == 0) {
+            g_nnConfig.bayerModelData = std::move(bytes);
+        } else if (kind == 1) {
+            g_nnConfig.xtransModelData = std::move(bytes);
+        } else {
+            return RA_ERR_INVALID_PARAM;
+        }
     } catch (const std::bad_alloc&) {
         return RA_ERR_OUT_OF_MEMORY;
     }
@@ -597,12 +624,10 @@ RA_API void RA_CALL raWarmupNnSession(void) {
     // an exception escape into the async runtime.
     try {
         rawalchemy::NnSessionConfig cfg;
-        // Read config set via ra_set_nn_config (explicit C-ABI transport — env
-        // vars are invisible to MSVC std::getenv on Windows). Platform-specific
-        // fields are read under the same #ifdef guards as the original getenv
-        // block. The socModel "0" default matches the old behavior:
-        // (p && *p) ? p : "0".
-        std::string bayer, xtrans;
+        // Read config set via ra_set_nn_config / ra_set_nn_model (explicit C-ABI
+        // transport — env vars are invisible to MSVC std::getenv on Windows).
+        // Model bytes are handed as non-owning pointers into the global vectors
+        // (stable for the process lifetime after ra_set_nn_model at startup).
 #ifdef _WIN32
         std::string directml;
 #elif defined(__ANDROID__)
@@ -610,8 +635,8 @@ RA_API void RA_CALL raWarmupNnSession(void) {
 #endif
         {
             std::lock_guard<std::mutex> lk(g_nnConfig.m);
-            bayer = g_nnConfig.bayer;
-            xtrans = g_nnConfig.xtrans;
+            cfg.bayerModelData = g_nnConfig.bayerModelData.empty() ? nullptr : &g_nnConfig.bayerModelData;
+            cfg.xtransModelData = g_nnConfig.xtransModelData.empty() ? nullptr : &g_nnConfig.xtransModelData;
 #ifdef _WIN32
             directml = g_nnConfig.directml;
 #elif defined(__ANDROID__)
@@ -621,8 +646,6 @@ RA_API void RA_CALL raWarmupNnSession(void) {
             appVersion = g_nnConfig.appVersion;
 #endif
         }
-        cfg.bayerModelPath = bayer;
-        cfg.xtransModelPath = xtrans;
 #ifdef _WIN32
         cfg.directmlDllPath = directml;
 #elif defined(__ANDROID__)
