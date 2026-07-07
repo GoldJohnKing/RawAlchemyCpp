@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <cmath>
 
 #include "aligned_allocator.h"
 #include "cfa_lookup.h"
@@ -25,6 +26,12 @@
 #include "demosaic_rcd.h"
 #include "demosaic_markesteijn.h"
 #include "denoise_xtrans.h"
+
+// NN demosaic path (Plan B Task 3): dispatch + session + camRGB->ProPhoto adapter
+#include "demosaic_dispatch.h"
+#include "nn_session.h"
+#include "nn_color_adapt.h"
+#include "color_convert.h"  // computeProPhotoMatrix: LibRaw out_cam = prophoto_rgb · rgb_cam
 
 namespace rawalchemy {
 
@@ -80,6 +87,10 @@ static AlignedVector<float> extractCfa(const unsigned short (*image)[4],
             } else {
                 c = bayerColor(row, col, raw.imgdata.idata.filters);
             }
+            // Caller (decodeRawNn) uses raw2image_ex(1), which runs adjust_bl()
+            // and subtracts the real per-channel black during the copy — matching
+            // the classical dcraw_process path. So image[][c] is already
+            // black-subtracted here; do NOT subtract again.
             cfa[static_cast<size_t>(row) * w + col] =
                 static_cast<float>(image[static_cast<size_t>(row) * w + col][c]) / whiteLevel;
         }
@@ -220,6 +231,208 @@ public:
     using LibRaw::callbacks;
 };
 
+// ---- NN demosaic path (Plan B Task 3) ----
+// When params.enableNnDemosaic && !halfSize, decodeRaw branches here BEFORE
+// dcraw_process. We bypass LibRaw's demosaic + color conversion entirely:
+// raw2image() gives black-subtracted CFA, the NN produces linear camRGB, and
+// camRgbToProPhotoLinear merges us back into the classical pipeline's contract
+// (linear ProPhoto [0,1]) so lens/vLog/LUT are unchanged.
+
+#ifdef RA_ENABLE_NN_DEMOSAIC
+/// Populate NnDemosaicInput.wbRgb + .xyzToCam from LibRaw color data.
+static void fillNnMetadata(NnDemosaicInput& in, const LibRaw& raw) {
+    const auto& color = raw.imgdata.color;
+    // cam_mul[0..3] are R,G1,B,G2; G-normalize so the green multiplier is 1.
+    const float g = color.cam_mul[1] > 0 ? color.cam_mul[1] : 1.0f;
+    in.wbRgb[0] = color.cam_mul[0] / g;
+    in.wbRgb[1] = 1.0f;
+    in.wbRgb[2] = color.cam_mul[2] / g;
+    // cam_xyz: LibRaw stores 4x3; take the leading 3x3 row-major.
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j)
+            in.xyzToCam[i * 3 + j] = static_cast<float>(color.cam_xyz[i][j]);
+}
+
+    // Fused finalize of the NN accumulated output: crop (pad offset) + normalize
+    // by blend weight + camRGB->ProPhoto matrix + orientation flip, all in one
+    // pass. Reads the NN's padded accumulators directly so no full-image camRGB
+    // intermediate is materialized. flip==0 (landscape) takes a branch-free
+    // sequential path; flip!=0 composes the crop offset with LibRaw's flip_index
+    // (file_write.cpp:22-31) for the source read. The color matrix is position-
+    // invariant, so finalize-and-rearrange is bit-identical to the old
+    // crop -> normalize -> convert -> rotate chain.
+    static void finalizeNnToProPhoto(float* dst, int dstW, int dstH,
+                                     const float* outAccum,
+                                     const float* weightAccum,
+                                     int paddedW, int phaseDx, int phaseDy,
+                                     int srcW, int srcH,
+                                     int flip, const float outCam[9]) {
+        if (flip == 0) {
+            for (int y = 0; y < srcH; ++y) {
+                const size_t padRow =
+                    static_cast<size_t>(y + phaseDy) * paddedW + phaseDx;
+                float* drow = dst + static_cast<size_t>(y) * srcW * 3;
+                for (int x = 0; x < srcW; ++x) {
+                    const size_t pIdx = padRow + x;
+                    const float w = weightAccum[pIdx];
+                    const float invW = (w > 0.0f) ? (1.0f / w) : 0.0f;
+                    const float cr = outAccum[pIdx * 3 + 0] * invW;
+                    const float cg = outAccum[pIdx * 3 + 1] * invW;
+                    const float cb = outAccum[pIdx * 3 + 2] * invW;
+                    const size_t d = static_cast<size_t>(x) * 3;
+                    drow[d + 0] = outCam[0] * cr + outCam[1] * cg + outCam[2] * cb;
+                    drow[d + 1] = outCam[3] * cr + outCam[4] * cg + outCam[5] * cb;
+                    drow[d + 2] = outCam[6] * cr + outCam[7] * cg + outCam[8] * cb;
+                }
+            }
+        } else {
+            for (int orow = 0; orow < dstH; ++orow) {
+                for (int ocol = 0; ocol < dstW; ++ocol) {
+                    int r = orow, c = ocol;
+                    if (flip & 4) std::swap(r, c);
+                    if (flip & 2) r = srcH - 1 - r;
+                    if (flip & 1) c = srcW - 1 - c;
+                    const size_t pIdx =
+                        static_cast<size_t>(r + phaseDy) * paddedW + (c + phaseDx);
+                    const float w = weightAccum[pIdx];
+                    const float invW = (w > 0.0f) ? (1.0f / w) : 0.0f;
+                    const float cr = outAccum[pIdx * 3 + 0] * invW;
+                    const float cg = outAccum[pIdx * 3 + 1] * invW;
+                    const float cb = outAccum[pIdx * 3 + 2] * invW;
+                    const size_t d = (static_cast<size_t>(orow) * dstW + ocol) * 3;
+                    dst[d + 0] = outCam[0] * cr + outCam[1] * cg + outCam[2] * cb;
+                    dst[d + 1] = outCam[3] * cr + outCam[4] * cg + outCam[5] * cb;
+                    dst[d + 2] = outCam[6] * cr + outCam[7] * cg + outCam[8] * cb;
+                }
+            }
+        }
+    }
+
+    /// Decode via the x-veon NN demosaic. Returns linear ProPhoto RGB [0,1].
+    /// Throws std::runtime_error on any failure (caller surfaces via RaResult).
+    static ImageBuffer decodeRawNn(LibRawAccessor& rawProcessor,
+                                    const DecodeParams& params) {
+    // raw2image_ex(1): copy CFA into imgdata.image[] AND subtract the real
+    // per-channel black (runs adjust_bl() first, then subtracts cblack during
+    // the copy — see LibRaw raw2image.cpp:427-432). This MUST match the
+    // classical dcraw_process path, which uses the same raw2image_ex(1). The
+    // plain raw2image() does NOT subtract black, leaving a per-channel offset
+    // that — after WB amplifies R and B far more than G — renders as a strong
+    // magenta cast (the model's residual CFA skip passes the imbalance through).
+    int ret = rawProcessor.raw2image_ex(1);
+    if (ret != LIBRAW_SUCCESS) {
+        throwLibRawError(ret, "raw2image_ex (NN path)");
+    }
+
+    auto& img = rawProcessor.imgdata;
+    const int w = static_cast<int>(img.sizes.width);
+    const int h = static_cast<int>(img.sizes.height);
+
+    auto (*image)[4] = reinterpret_cast<unsigned short (*)[4]>(img.image);
+    if (!image) {
+        throw std::runtime_error("[NN] imgdata.image is null after raw2image");
+    }
+
+    // One-time NN session init (idempotent singleton — Plan A's NnDemosaicSession).
+    auto& sess = NnDemosaicSession::instance();
+    if (!sess.isReady()) {
+        NnSessionConfig cfg;
+        cfg.bayerModelData = params.nnBayerModelData;
+        cfg.xtransModelData = params.nnXtransModelData;
+#ifdef _WIN32
+        cfg.directmlDllPath = params.nnDirectmlDllPath;
+        #elif defined(__ANDROID__)
+            cfg.socModel = params.nnSocModel.empty() ? std::string{"0"} : params.nnSocModel;
+            cfg.htpArch = params.nnHtpArch;
+            cfg.ctxDir = params.nnCtxDir;
+            cfg.appVersion = params.nnAppVersion;
+        #endif
+        if (!sess.init(cfg)) {
+            throw std::runtime_error("[NN] session init failed");
+        }
+    }
+
+    // extractCfa divides by whiteLevel, landing the CFA in [0,1]. nnDemosaic's
+    // fused prep loop applies (raw-black)/(white-black) * WB; since the CFA is
+    // already normalized and raw2image subtracted black, we pass blackLevel=0
+    // and whiteLevel=1 so the normalize factor is identity (no double scale).
+    const float rawMax = static_cast<float>(img.color.maximum);
+    if (!(rawMax > 0.0f)) {
+        throw std::runtime_error("[NN] imgdata.color.maximum is zero/invalid");
+    }
+    AlignedVector<float> cfa = extractCfa(image, w, h, rawProcessor, rawMax);
+
+    NnDemosaicInput in{};
+    in.width = w;
+    in.height = h;
+    in.filters = img.idata.filters;
+    in.cfaMosaic = cfa.data();
+    in.blackLevel = 0.0f;   // raw2image already subtracted black
+    in.whiteLevel = 1.0f;   // cfa already normalized by extractCfa above
+    fillNnMetadata(in, rawProcessor);
+
+    // Copy the camera's ACTUAL X-Trans pattern — cameras ship different
+    // rotations of the 6×6 arrangement; the hardcoded canonical does NOT match.
+    if (img.idata.filters == 9) {
+        for (int yy = 0; yy < 6; ++yy)
+            for (int xx = 0; xx < 6; ++xx)
+                in.xtransPattern[yy][xx] = img.idata.xtrans[yy][xx];
+    }
+
+    NnDemosaicOutput out;
+    NnDemosaicStatus st = demosaicDispatch(in, out, DemosaicPath::Neural);
+    if (st != NnDemosaicStatus::Ok) {
+        const char* reason = "unknown";
+        switch (st) {
+            case NnDemosaicStatus::SessionNotReady: reason = "session not ready"; break;
+            case NnDemosaicStatus::NaNOutput:       reason = "NaN output"; break;
+            case NnDemosaicStatus::InferenceFailed: reason = "inference failed"; break;
+            case NnDemosaicStatus::InvalidParam:    reason = "invalid param"; break;
+            default: break;
+        }
+        throw std::runtime_error(std::string("[NN] demosaic failed: ") + reason);
+    }
+
+    // nnDemosaic now hands off its padded accumulators + geometry (no camRGB
+    // intermediate). Finalize straight from them below: crop + weight-normalize
+    // + camRGB->ProPhoto + orientation flip in one pass. nnDemosaic always
+    // accumulates camRGB (outputCamRgb was removed in Plan A); we convert to
+    // linear ProPhoto via LibRaw's rgb_cam (out_cam = prophoto_rgb · rgb_cam,
+    // the same matrix the classical output_color=4 path uses) so we stay
+    // bit-identical into vLog/LUT.
+
+    // Allocate at display dimensions: the NN path bypasses LibRaw's flip (applied
+    // in dcraw_process), so the orientation is folded into the finalize pass
+    // below. flip==0 (landscape) takes a branch-free sequential read path.
+    const int flip = img.sizes.flip;
+    const bool transpose = (flip & 4) != 0;
+    const int outW = transpose ? h : w;
+    const int outH = transpose ? w : h;
+    ImageBuffer result(outW, outH, 3);
+
+    // camRGB→ProPhoto matching LibRaw convert_to_rgb() output_color=4 exactly:
+    //   out_cam = prophoto_rgb · rgb_cam   (postprocessing_utils_dcrdefs.cpp:98-101)
+    // rgb_cam is derived from cam_xyz by cam_xyz_coeff() (utils_dcraw.cpp:282-313),
+    // so it already carries the correct D65 white-point normalization. The NN
+    // output is cam_mul-WB'd (equivalent to scale_colors under use_camera_wb=1),
+    // which is the input rgb_cam expects — apply directly. Do NOT add daylight
+    // pre_mul on top (it would double-white-balance and re-introduce a cast).
+    float outCam[3][4];
+    computeProPhotoMatrix(img.color.rgb_cam, outCam);
+    const float camToProPhoto[9] = {
+        outCam[0][0], outCam[0][1], outCam[0][2],
+        outCam[1][0], outCam[1][1], outCam[1][2],
+        outCam[2][0], outCam[2][1], outCam[2][2]
+    };
+    finalizeNnToProPhoto(result.ptr(), outW, outH,
+                         out.outAccum.data(), out.weightAccum.data(),
+                         out.paddedW, out.phaseDx, out.phaseDy,
+                         w, h, flip, camToProPhoto);
+
+    return result;
+}
+#endif // RA_ENABLE_NN_DEMOSAIC
+
 // ---- decodeRaw ----
 ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
                        ExifCollector* exifCollector) {
@@ -340,6 +553,18 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
         p.fbdd_noiserd = params.fbddNoiserd;
     }
 
+    // --- NN demosaic branch (final full-res only; preview always classical) ---
+    // Branch BEFORE dcraw_process: the NN path calls raw2image() itself and
+    // bypasses LibRaw's demosaic + color conversion, returning linear ProPhoto
+    // directly. Unreachable unless params.enableNnDemosaic is set AND models are
+    // loaded (Task 8 exercises it). Throws on failure; the CAPI layer wraps the
+    // exception into an RaResult.
+#ifdef RA_ENABLE_NN_DEMOSAIC
+    if (params.enableNnDemosaic && !params.halfSize) {
+        return decodeRawNn(rawProcessor, params);
+    }
+#endif
+
     // --- Process (demosaic + color conversion + gamma) ---
     // With our callbacks registered, LibRaw calls our RCD/Markesteijn
     // during the demosaic step, then continues with its own postprocessing.
@@ -401,6 +626,7 @@ ImageBuffer decodeRaw(const std::string& rawPath, const DecodeParams& params,
     }
 
     LibRaw::dcraw_clear_mem(processed);
+
     return result;
 }
 

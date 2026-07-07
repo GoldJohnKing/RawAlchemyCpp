@@ -14,7 +14,9 @@
 
 #include "common.h"
 #include "demosaic.h"
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace rawalchemy {
 
@@ -81,6 +83,23 @@ struct DecodeParams {
     /// Demosaic algorithm selection (default AUTO: Bayer→RCD, X-Trans→Markesteijn).
     /// Set to LIBRAW_FALLBACK to use the original LibRaw path (uses demosaicQuality).
     DemosaicAlgorithm demosaicAlgorithm = DemosaicAlgorithm::AUTO;
+
+    /// Enable NN (x-veon) demosaic. When true, the decoder dispatches to the NN
+    /// path instead of the classical RCD/Markesteijn kernels. Ignored for halfSize.
+    bool enableNnDemosaic = false;
+
+    // NN model weights populated by the CAPI layer before calling decodeRaw when
+    // enableNnDemosaic. Non-owning pointers into the process-global g_nnConfig
+    // (set once via ra_set_nn_model); null = no model (NN degrades to classical).
+    // Option D: bytes, not file paths — ORT loads them from memory.
+    const std::vector<uint8_t>* nnBayerModelData = nullptr;
+    const std::vector<uint8_t>* nnXtransModelData = nullptr;
+    std::string nnQnnContextBinaryDir;   // Android only
+    std::string nnDirectmlDllPath;       // Windows only
+    std::string nnSocModel;  // Android only: QNN "soc_model" numeric string (e.g. "69" for SM8750). "0" = auto-detect.
+    std::string nnHtpArch;   // Android only: QNN "htp_arch" ("73"/"75"/...). Empty = infer.
+    std::string nnCtxDir;    // Android only: app data dir for QNN context cache. Empty = no cache.
+    std::string nnAppVersion;  // Android only: app version (cache key component).
 };
 
 /**

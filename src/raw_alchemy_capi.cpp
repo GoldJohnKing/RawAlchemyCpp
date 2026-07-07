@@ -5,6 +5,8 @@
 
 #include "raw_alchemy_capi.h"
 
+#include "nn_session.h"
+#include "nn_logging.h"
 #include "raw_decoder.h"
 #include "metering.h"
 #include "tiff_writer.h"
@@ -17,8 +19,13 @@
 
 #include <libraw/libraw.h>
 #include <cstring>
+#include <cstdlib>
+#include <cstdint>
+#include <mutex>
 #include <string>
 #include <stdexcept>
+#include <utility>
+#include <vector>
 
 // ----------------------------------------------------------------
 //  Thread-local error message storage
@@ -26,6 +33,28 @@
 namespace {
 
 thread_local std::string g_lastError;
+
+// ----------------------------------------------------------------
+//  NN runtime config store (explicit C-ABI transport — replaces RA_NN_* env
+//  vars, which are invisible to MSVC std::getenv on Windows due to
+//  CRT/Win32 environment desync). Last-call-wins under a mutex; all strings
+//  are deep-copied on ra_set_nn_config so the caller may free immediately.
+// ----------------------------------------------------------------
+struct NnRuntimeConfig {
+    std::mutex m;
+    // Option D: model weights held as in-memory ONNX byte buffers (set once via
+    // ra_set_nn_model). Non-owning pointers into these vectors are handed to
+    // NnSessionConfig / DecodeParams, so the vectors must remain stable for the
+    // process lifetime after ra_set_nn_model (never reassigned post-startup).
+    std::vector<uint8_t> bayerModelData;
+    std::vector<uint8_t> xtransModelData;
+    std::string directml;
+    std::string socModel;
+    std::string htpArch;
+    std::string ctxDir;
+    std::string appVersion;
+};
+NnRuntimeConfig g_nnConfig;
 
 void setError(const std::string& msg) {
     g_lastError = msg;
@@ -48,6 +77,23 @@ RaResult catchExceptions(const char* context) {
         setError(std::string(context) + ": unknown error");
         return RA_ERR_UNKNOWN;
     }
+}
+
+/// Copy the 7 NN config fields from g_nnConfig into DecodeParams, under the
+/// config mutex. Replaces the per-call-site RA_NN_* env reads so the NN path
+/// works on Windows (env vars set by the Rust host are invisible to MSVC
+/// std::getenv — CRT/Win32 desync).
+void applyNnConfig(rawalchemy::DecodeParams& params) {
+    std::lock_guard<std::mutex> lk(g_nnConfig.m);
+    // Hand non-owning pointers into the global model-byte vectors (cheap; the
+    // vectors are stable for the process lifetime after ra_set_nn_model).
+    params.nnBayerModelData = g_nnConfig.bayerModelData.empty() ? nullptr : &g_nnConfig.bayerModelData;
+    params.nnXtransModelData = g_nnConfig.xtransModelData.empty() ? nullptr : &g_nnConfig.xtransModelData;
+    params.nnDirectmlDllPath = g_nnConfig.directml;
+    params.nnSocModel = g_nnConfig.socModel;
+    params.nnHtpArch = g_nnConfig.htpArch;
+    params.nnCtxDir = g_nnConfig.ctxDir;
+    params.nnAppVersion = g_nnConfig.appVersion;
 }
 
 } // anonymous namespace
@@ -317,7 +363,8 @@ RA_API RaResult RA_CALL raProcessFile(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 ) {
     if (!inputPath || !outputPath) {
         setError("raProcessFile: null path parameter");
@@ -325,6 +372,10 @@ RA_API RaResult RA_CALL raProcessFile(
     }
     clearError();
 
+    // DEBUG: classical fallback removed. When NN demosaic is requested and fails
+    // (init/null-DML, NaN guard, inference error), the exception propagates so the
+    // caller sees the failure reason in raGetLastError() instead of a silent retry.
+    rawalchemy::ExifCollector* exifCollector = nullptr;
     try {
         // Determine output format from extension
         std::string ext = outputPath;
@@ -333,11 +384,16 @@ RA_API RaResult RA_CALL raProcessFile(
                       (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
 
         // Create EXIF collector for JPEG output
-        rawalchemy::ExifCollector* exifCollector = isJpeg
-            ? rawalchemy::createExifCollector() : nullptr;
+        exifCollector = isJpeg ? rawalchemy::createExifCollector() : nullptr;
 
         // Decode (with optional EXIF collection)
-        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
+        rawalchemy::DecodeParams params;
+        params.enableNnDemosaic = (enableNnDemosaic != 0);
+        // NN model paths + QNN config are injected by the Rust host via
+        // ra_set_nn_config (explicit C-ABI transport — env vars are invisible
+        // to MSVC std::getenv on Windows due to CRT/Win32 environment desync).
+        applyNnConfig(params);
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
 
         // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
@@ -371,6 +427,7 @@ RA_API RaResult RA_CALL raProcessFile(
         }
         return RA_OK;
     } catch (...) {
+        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
         return catchExceptions("raProcessFile");
     }
 }
@@ -387,7 +444,8 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 ) {
     if (!inputPath || !outputPath) {
         setError("raProcessFileWithLUT: null path parameter");
@@ -395,6 +453,8 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     }
     clearError();
 
+    // DEBUG: classical fallback removed — see raProcessFile.
+    rawalchemy::ExifCollector* exifCollector = nullptr;
     try {
         // Determine output format from extension
         std::string ext = outputPath;
@@ -403,10 +463,13 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
                       (ext.size() >= 5 && ext.compare(ext.size()-5, 5, ".jpeg") == 0);
 
         // Create EXIF collector for JPEG output
-        rawalchemy::ExifCollector* exifCollector = isJpeg
-            ? rawalchemy::createExifCollector() : nullptr;
+        exifCollector = isJpeg ? rawalchemy::createExifCollector() : nullptr;
 
-        auto img = rawalchemy::decodeRaw(std::string(inputPath), {}, exifCollector);
+        rawalchemy::DecodeParams params;
+        params.enableNnDemosaic = (enableNnDemosaic != 0);
+        // NN config injected via ra_set_nn_config — see raProcessFile.
+        applyNnConfig(params);
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), params, exifCollector);
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
 
         rawalchemy::LUT3D lut;
@@ -456,6 +519,7 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
         }
         return RA_OK;
     } catch (...) {
+        if (exifCollector) rawalchemy::destroyExifCollector(exifCollector);
         return catchExceptions("raProcessFileWithLUT");
     }
 }
@@ -468,7 +532,8 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     float       evOffset,
     int         enableLensCorrection,
     const char* customLensfunDb,
-    RaImageBuffer* outBuf
+    RaImageBuffer* outBuf,
+    int         enableNnDemosaic
 ) {
     if (!inputPath || !outBuf) {
         setError("raProcessToBuffer: null parameter");
@@ -476,9 +541,14 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     }
     clearError();
 
+    // DEBUG: classical fallback removed — see raProcessFile.
     try {
         // Decode
-        auto img = rawalchemy::decodeRaw(std::string(inputPath));
+        rawalchemy::DecodeParams params;
+        params.enableNnDemosaic = (enableNnDemosaic != 0);
+        // NN config injected via ra_set_nn_config — see raProcessFile.
+        applyNnConfig(params);
+        auto img = rawalchemy::decodeRaw(std::string(inputPath), params);
 
         // Metadata (for lens correction)
         auto meta = rawalchemy::extractMetadata(std::string(inputPath));
@@ -495,6 +565,108 @@ RA_API RaResult RA_CALL raProcessToBuffer(
         return catchExceptions("raProcessToBuffer");
     }
 }
+
+// ----------------------------------------------------------------
+//  NN runtime config (explicit C-ABI transport — replaces RA_NN_* env vars)
+// ----------------------------------------------------------------
+
+RA_API RaResult RA_CALL ra_set_nn_config(const RaNnConfig* cfg) {
+    // NULL config is a no-op (leave whatever was previously set).
+    if (!cfg) return RA_OK;
+    try {
+        std::lock_guard<std::mutex> lk(g_nnConfig.m);
+        // Deep-copy every field so the caller may free its strings immediately
+        // after this returns. NULL fields → empty string (unset / N/A).
+        g_nnConfig.directml  = cfg->directml_dll_path ? std::string(cfg->directml_dll_path) : std::string{};
+        g_nnConfig.socModel  = cfg->soc_model         ? std::string(cfg->soc_model)         : std::string{};
+        g_nnConfig.htpArch   = cfg->htp_arch          ? std::string(cfg->htp_arch)          : std::string{};
+        g_nnConfig.ctxDir    = cfg->ctx_dir           ? std::string(cfg->ctx_dir)           : std::string{};
+        g_nnConfig.appVersion = cfg->app_version      ? std::string(cfg->app_version)       : std::string{};
+    } catch (const std::bad_alloc&) {
+        return RA_ERR_OUT_OF_MEMORY;
+    }
+    return RA_OK;
+}
+
+RA_API RaResult RA_CALL ra_set_nn_model(int kind, const void* data, size_t len) {
+    try {
+        std::lock_guard<std::mutex> lk(g_nnConfig.m);
+        std::vector<uint8_t> bytes;
+        if (data && len > 0) {
+            bytes.assign(static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data) + len);
+        }
+        if (kind == 0) {
+            g_nnConfig.bayerModelData = std::move(bytes);
+        } else if (kind == 1) {
+            g_nnConfig.xtransModelData = std::move(bytes);
+        } else {
+            return RA_ERR_INVALID_PARAM;
+        }
+    } catch (const std::bad_alloc&) {
+        return RA_ERR_OUT_OF_MEMORY;
+    }
+    return RA_OK;
+}
+
+RA_API void RA_CALL ra_set_log_file(const char* path) {
+    // Forward to the header-only nnlog store (NULL → revert to stderr).
+    nnlog::set_log_file(path);
+}
+
+#ifdef RA_ENABLE_NN_DEMOSAIC
+// ----------------------------------------------------------------
+//  NN session warmup
+// ----------------------------------------------------------------
+
+RA_API void RA_CALL raWarmupNnSession(void) {
+    // Defensive guard: init() shouldn't throw after the thread-safety fix, but
+    // this runs on a fire-and-forget background thread at app launch — never let
+    // an exception escape into the async runtime.
+    try {
+        rawalchemy::NnSessionConfig cfg;
+        // Read config set via ra_set_nn_config / ra_set_nn_model (explicit C-ABI
+        // transport — env vars are invisible to MSVC std::getenv on Windows).
+        // Model bytes are handed as non-owning pointers into the global vectors
+        // (stable for the process lifetime after ra_set_nn_model at startup).
+#ifdef _WIN32
+        std::string directml;
+#elif defined(__ANDROID__)
+        std::string socModel, htpArch, ctxDir, appVersion;
+#endif
+        {
+            std::lock_guard<std::mutex> lk(g_nnConfig.m);
+            cfg.bayerModelData = g_nnConfig.bayerModelData.empty() ? nullptr : &g_nnConfig.bayerModelData;
+            cfg.xtransModelData = g_nnConfig.xtransModelData.empty() ? nullptr : &g_nnConfig.xtransModelData;
+#ifdef _WIN32
+            directml = g_nnConfig.directml;
+#elif defined(__ANDROID__)
+            socModel = g_nnConfig.socModel;
+            htpArch = g_nnConfig.htpArch;
+            ctxDir = g_nnConfig.ctxDir;
+            appVersion = g_nnConfig.appVersion;
+#endif
+        }
+#ifdef _WIN32
+        cfg.directmlDllPath = directml;
+#elif defined(__ANDROID__)
+        cfg.socModel = !socModel.empty() ? socModel : std::string("0");
+        cfg.htpArch = htpArch;
+        cfg.ctxDir = ctxDir;
+        cfg.appVersion = appVersion;
+#endif
+        // Best-effort: init() returns false on failure (never throws). The edit
+        // path will re-attempt via decodeRawNn if this background call didn't
+        // succeed. If it did succeed, the edit path's init() is a lock-free no-op.
+        rawalchemy::NnDemosaicSession::instance().init(cfg);
+    } catch (...) {
+        // Swallow — background warmup must never crash the app.
+    }
+}
+
+RA_API bool RA_CALL raIsNnReady(void) {
+    return rawalchemy::NnDemosaicSession::instance().isReady();
+}
+#endif // RA_ENABLE_NN_DEMOSAIC
 
 // ----------------------------------------------------------------
 //  Utility

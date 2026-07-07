@@ -1,6 +1,6 @@
 # Build
 build/
-build-windows-dll/
+build-windows-dll*/
 build-windows-tests/
 build-android-*/
 cmake-build-*/
@@ -27,3 +27,6 @@ output_exif.jpg
 
 # Reference source code fetched for porting (GPL-3.0, not part of our source)
 .reference/
+
+# Vendored NN runtime deps (ORT/DirectML/QNN), fetched by scripts/fetch-nn-deps.sh
+third_party/nn-cache/

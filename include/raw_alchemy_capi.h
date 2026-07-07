@@ -16,6 +16,8 @@
 
 #include "raw_alchemy_export.h"
 
+#include <stddef.h>  // size_t
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +36,9 @@ typedef enum RaResult_ {
     RA_ERR_WRITE_FAILED    = -7,
     RA_ERR_NO_LENS_PROFILE = -8,
     RA_ERR_OUT_OF_MEMORY   = -9,
+    RA_ERR_NN_NOT_INITIALIZED  = -10,
+    RA_ERR_NN_NAN_OUTPUT       = -11,
+    RA_ERR_NN_INFERENCE_FAILED = -12,
 } RaResult;
 
 /* ----------------------------------------------------------------
@@ -86,6 +91,9 @@ RA_API int RA_CALL raImageGetDataSizeBytes(RaImageBuffer buf);
  *  @param jpegQuality JPEG quality 1-100 (only used for JPEG output).
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
+ *  @param enableNnDemosaic  0 = classical demosaic (RCD/Markesteijn). Non-zero = NN demosaic
+ *                           (x-veon). Ignored when halfSize != 0 (preview path). If NN is not
+ *                           initialized or fails, returns RA_ERR_NN_* (caller decides retry).
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raProcessFile(
     const char* inputPath,
@@ -96,7 +104,8 @@ RA_API RaResult RA_CALL raProcessFile(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 );
 
 /** Process a RAW file with a pre-parsed LUT (avoids repeated file I/O).
@@ -119,6 +128,9 @@ RA_API RaResult RA_CALL raProcessFile(
  *  @param jpegQuality JPEG quality 1-100.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
+ *  @param enableNnDemosaic  0 = classical demosaic (RCD/Markesteijn). Non-zero = NN demosaic
+ *                           (x-veon). Ignored when halfSize != 0 (preview path). If NN is not
+ *                           initialized or fails, returns RA_ERR_NN_* (caller decides retry).
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raProcessFileWithLUT(
     const char* inputPath,
@@ -132,7 +144,8 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
     float       evOffset,
     int         jpegQuality,
     int         enableLensCorrection,
-    const char* customLensfunDb
+    const char* customLensfunDb,
+    int         enableNnDemosaic
 );
 
 /** Process a RAW file through the full pipeline and return pixel data.
@@ -147,6 +160,9 @@ RA_API RaResult RA_CALL raProcessFileWithLUT(
  *  @param evOffset Exposure offset in stops, applied on top of auto-metered exposure.
  *  @param enableLensCorrection  If non-zero, enable lens correction.
  *  @param customLensfunDb      Custom Lensfun DB path, or NULL.
+ *  @param enableNnDemosaic  0 = classical demosaic (RCD/Markesteijn). Non-zero = NN demosaic
+ *                           (x-veon). Ignored when halfSize != 0 (preview path). If NN is not
+ *                           initialized or fails, returns RA_ERR_NN_* (caller decides retry).
  *  @param outBuf      Receives the processed image. Caller must destroy.
  *  @return RA_OK on success. */
 RA_API RaResult RA_CALL raProcessToBuffer(
@@ -157,8 +173,77 @@ RA_API RaResult RA_CALL raProcessToBuffer(
     float       evOffset,
     int         enableLensCorrection,
     const char* customLensfunDb,
-    RaImageBuffer* outBuf
+    RaImageBuffer* outBuf,
+    int         enableNnDemosaic
 );
+
+/** Eagerly initialize the NN demosaic session in the background. Reads the
+ *  config set via ra_set_nn_config and calls NnDemosaicSession::init().
+ *  Best-effort: any failure is logged and swallowed (init() itself never throws
+ *  after the thread-safety fix); the edit path will re-attempt if this didn't
+ *  succeed. Intended to be called from a background thread at app launch so the
+ *  ~2s QNN graph compile overlaps with the user browsing photos. */
+RA_API void RA_CALL raWarmupNnSession(void);
+
+/** Returns true iff the NN demosaic session successfully initialized (NPU
+ *  engaged). Intended for the Rust fallback router to distinguish an NN-
+ *  structural-unavailability failure (init failed → latch classical for the
+ *  session) from a per-file NN error on a ready session (fall back for this
+ *  file only, no latch). */
+RA_API bool RA_CALL raIsNnReady(void);
+
+/* ----------------------------------------------------------------
+ *  NN Runtime Configuration (explicit C-ABI transport)
+ *
+ *  Replaces the legacy RA_NN_* environment-variable transport. Rust's
+ *  std::env::set_var calls SetEnvironmentVariableW, which is invisible to
+ *  MSVC's std::getenv (CRT/Win32 environment desync), so on Windows all NN
+ *  config read as NULL. These explicit setters carry the config through a
+ *  stable C struct instead, with the implementation deep-copying every
+ *  non-NULL string so the caller may free immediately after the call.
+ * ---------------------------------------------------------------- */
+
+/* NN runtime config. All fields are UTF-8 strings and individually nullable
+ * (NULL = unset / N/A for this platform). Field semantics:
+ *   directml_dll_path — DirectML.dll path; parent dir → SetDllDirectoryA (Windows only)
+ *   soc_model         — QNN numeric SoC model, e.g. "43" for SM8550 (Android only)
+ *   htp_arch          — QNN Hexagon arch, e.g. "73" (Android only)
+ *   ctx_dir           — QNN context-cache dir (Android only)
+ *   app_version       — embedded in the context-cache filename (Android)
+ *
+ * Model WEIGHTS are NOT carried here — they are in-memory ONNX byte buffers
+ * supplied via ra_set_nn_model() (Option D: the host embeds gzip-compressed
+ * models in its binary, decompresses them, and hands the bytes to the C++ core,
+ * which feeds them to ORT's in-memory Session ctor — no disk file/path).
+ */
+typedef struct RaNnConfig {
+    const char* directml_dll_path;
+    const char* soc_model;
+    const char* htp_arch;
+    const char* ctx_dir;
+    const char* app_version;
+} RaNnConfig;
+
+/** Set the NN runtime config. Deep-copies every non-NULL field under a mutex
+ *  (last-call-wins). Safe to pass NULL (no-op, returns RA_OK). Caller may free
+ *  the strings immediately after this returns.
+ *  @return RA_OK, or RA_ERR_OUT_OF_MEMORY if a string copy throws bad_alloc. */
+RA_API RaResult RA_CALL ra_set_nn_config(const RaNnConfig* cfg);
+
+/* Supply an NN model's ONNX weights as an in-memory byte buffer. `kind` selects
+ * the model: 0 = bayer, 1 = xtrans. `data`/`len` are deep-copied under the NN
+ * config mutex, so the caller may free `data` immediately after this returns.
+ * Replaces the former bayer_model_path / xtrans_model_path config fields
+ * (Option D: ORT loads weights from memory, no on-disk model file). Pass len=0
+ * to clear a model (sets it to "absent"). Best-effort allocation errors return
+ * RA_ERR_OUT_OF_MEMORY; otherwise RA_OK. */
+RA_API RaResult RA_CALL ra_set_nn_model(int kind, const void* data, size_t len);
+
+/** Redirect C++ NN diagnostics (nnlog::info) to `path` (opened in append mode).
+ *  Pass NULL to revert to stderr. Deep-copies the path under a mutex. The
+ *  nnlog fallback is: if the path is unset or the file can't be opened, write
+ *  to stderr instead. */
+RA_API void RA_CALL ra_set_log_file(const char* path);
 
 /* ----------------------------------------------------------------
  *  Preview Session — two-phase preview pipeline

@@ -1,0 +1,57 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Pure preprocessing primitives for x-veon NN demosaic.
+// Algorithms: see docs/nn-demosaic-design.md §2.3.
+#pragma once
+#include <cstddef>
+#include "cfa_lookup.h"  // for unsigned filters helpers
+
+namespace rawalchemy {
+
+/** Detected CFA phase relative to canonical RGGB (Bayer) or canonical X-Trans 6x6.
+ *  `dy`,`dx` is the top-left offset to mirror-pad so the image origin aligns
+ *  to the canonical pattern (R at (0,0) for Bayer). */
+struct CfaPhase {
+    int dy = 0;
+    int dx = 0;
+    int period = 2;       // 2 for Bayer, 6 for X-Trans
+    bool isXtrans = false;
+    /** Camera's actual X-Trans pattern [6][6] (0=R,1=G,2=B). For X-Trans,
+     *  populated from imgdata.idata.xtrans — cameras ship different rotations.
+     *  Used by canonicalCfaColor + makeCanonicalMasks. */
+    int cameraPattern[6][6] = {};
+};
+
+/** Detect the CFA family and phase. For Bayer orientations other than RGGB,
+ *  returns the offset needed to align to RGGB origin. For X-Trans returns
+ *  period=6, dy=dx=0 (LibRaw delivers canonically-aligned X-Trans). */
+CfaPhase detectCfaPhase(unsigned filters);
+
+/** Tile constants — fixed by the static ONNX export (design §2.5). */
+static constexpr int NN_PATCH_SIZE = 288;
+static constexpr int NN_OVERLAP = 48;
+static constexpr int NN_STRIDE = NN_PATCH_SIZE - NN_OVERLAP;  // 240
+
+/** Returns the canonical CFA color (0=R, 1=G, 2=B) at canonical-aligned
+ *  position (y,x). Assumes the image origin has been mirror-padded to the
+ *  canonical pattern using CfaPhase, so (0,0) is the canonical R origin.
+ *  This is the single source of truth for the canonical-pattern lookup,
+ *  shared by per-site white balance and canonical mask construction. Negative
+ *  or large coordinates are folded by reflecting/modulo against the period. */
+int canonicalCfaColor(int y, int x, const CfaPhase& phase);
+
+/** Fill three NN_PATCH_SIZE × NN_PATCH_SIZE planes with one-hot masks of the
+ *  CANONICAL CFA pattern (RGGB for Bayer, the standard 6×6 for X-Trans).
+ *  The image is assumed already phase-aligned via mirror-pad using CfaPhase.
+ *  Implemented in terms of canonicalCfaColor(). */
+void makeCanonicalMasks(float* outMaskR, float* outMaskG, float* outMaskB,
+                        const CfaPhase& phase);
+
+/** Assemble the [1,4,288,288] planar NCHW tile input from a CFA tile + 3 masks.
+ *  Channel order: [CFA gray, R mask, G mask, B mask]. */
+void packTileInput(float* outTile4ch,
+                   const float* cfaTile,
+                   const float* maskR,
+                   const float* maskG,
+                   const float* maskB);
+
+} // namespace rawalchemy
