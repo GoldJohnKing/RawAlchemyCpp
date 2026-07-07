@@ -43,11 +43,14 @@ if /I not "%VARIANT%"=="neural" if /I not "%VARIANT%"=="legacy" (
     exit /b 1
 )
 
+REM Polarity: legacy=default dir (no suffix), neural=build-windows-dll_nn-demosaic.
 set "BUILD_DIR=build-windows-dll"
 set "NN_FLAG=ON"
 if /I "%VARIANT%"=="legacy" (
-    set "BUILD_DIR=build-windows-dll-legacy"
     set "NN_FLAG=OFF"
+)
+if /I "%VARIANT%"=="neural" (
+    set "BUILD_DIR=build-windows-dll_nn-demosaic"
 )
 
 REM Locate the latest Visual Studio installation via vswhere (bundled with VS Installer).

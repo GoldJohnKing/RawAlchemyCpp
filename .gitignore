@@ -1,7 +1,6 @@
 # Build
 build/
-build-windows-dll/
-build-windows-dll-legacy/
+build-windows-dll*/
 build-windows-tests/
 build-android-*/
 cmake-build-*/
