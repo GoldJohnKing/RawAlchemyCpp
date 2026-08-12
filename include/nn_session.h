@@ -70,8 +70,8 @@ public:
 
     /** Initialize both sessions. Returns true only if BOTH models load AND the
      *  platform EP registers without error. Any failure (EP unavailable, model
-     *  file missing, ORT error, or verifyQnnEngaged rejecting silent full-CPU
-     *  fallback) returns false; the caller treats false as permanent and routes
+     *  file missing, ORT error, or verifyQnnEngaged (Android-only) rejecting
+     *  silent full-CPU placement) returns false; the caller treats false as
      *  to traditional demosaic. Failure is LATCHED for the process lifetime:
      *  once init() returns false it will not re-attempt (NPU availability is
      *  stable for a session, and re-compiling wastes seconds per call). Restart

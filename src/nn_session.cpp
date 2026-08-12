@@ -3,9 +3,9 @@
 //
 // EP selection is platform-conditional:
 //   _WIN32     -> DirectML (device 0, app-local DLL via SetDllDirectoryA)
-//   __ANDROID__-> QNN HTP FP16 (generic SessionOptionsAppendExecutionProvider,
-//                "QNN" + key/value map; CPU fallback disabled via session config)
-//   Linux      -> CPU EP (ORT default; no Append call needed)
+//   __ANDROID__-> QNN HTP FP16 (Ort::SessionOptions::AppendExecutionProvider,
+//                "QNN" + key/value map; verifyQnnEngaged() rejects silent
+//                full-CPU placement at compile time — see below)
 //
 // API provenance (ORT 1.24.1, verified against vendored headers +
 // onnxruntime.ai/docs/execution-providers/):
@@ -18,9 +18,6 @@
 //               vendor omits, so the ABI-matching layout is defined locally below.)
 //   - QNN:      Ort::SessionOptions::AppendExecutionProvider("QNN", unordered_map)
 //               wrapping OrtApi::SessionOptionsAppendExecutionProvider(...)
-//   - CPU-fallback disable: session config key kOrtSessionOptionsDisableCPUEPFallback
-//               ("session.disable_cpu_ep_fallback") — a SESSION config entry, NOT
-//               a QNN provider option (commonly misdocumented as the latter).
 //
 // PIMPL: all Ort:: members live in NnDemosaicSession::Impl below so that
 // nn_session.h does not transitively include <onnxruntime_cxx_api.h>.
@@ -30,7 +27,6 @@
 #include "nn_logging.h"
 
 #include <onnxruntime_cxx_api.h>  // Ort::Env, Ort::Session, Ort::SessionOptions
-#include <onnxruntime_session_options_config_keys.h>  // kOrtSessionOptionsDisableCPUEPFallback
 
 #include <chrono>
 #include <cstdio>       // std::remove
@@ -252,8 +248,8 @@ void verifyQnnEngaged(const Ort::Session& session, const char* modelName) {
     if (qnnNodes == 0) {
         throw std::runtime_error(
             std::string("[NN] ") + modelName +
-            ": NPU not engaged — QNN EP took 0 nodes (full-CPU fallback disabled "
-            "for verification). Check libQnnHtp*.so / libcdsprpc.so presence and model ops.");
+            ": NPU not engaged — QNN EP took 0 nodes (rejected by verifyQnnEngaged; "
+            "full-CPU inference is not accepted). Check libQnnHtp*.so / libcdsprpc.so presence and model ops.");
     }
 }
 
