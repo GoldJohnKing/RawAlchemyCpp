@@ -4,8 +4,8 @@
 // caller-chosen DemosaicPath value.
 //
 // The neural path returns its NnDemosaicStatus verbatim — NO silent fallback
-// to the classical path on NaNOutput / InferenceFailed (design §6.2: the
-// caller decides how to react, e.g. surface an error or retry classically).
+// to the classical path on NaNOutput / InferenceFailed: the caller decides
+// how to react (surface an error or retry classically).
 //
 // The classical path is a Plan A stub: it returns InvalidParam. Plan B wires
 // the real RCD (Bayer) and Markesteijn (X-Trans) ports, which are already
@@ -30,7 +30,7 @@ enum class DemosaicPath {
  *  @param path  Classical or Neural.
  *  @return NnDemosaicStatus::Ok on success; otherwise the underlying path's
  *          status. For DemosaicPath::Neural the status is returned verbatim
- *          (no auto-fallback on NaNOutput / InferenceFailed — design §6.2).
+ *          (no auto-fallback on NaNOutput / InferenceFailed).
  *          For DemosaicPath::Classical the Plan A stub returns InvalidParam. */
 NnDemosaicStatus demosaicDispatch(const NnDemosaicInput& in,
                                   NnDemosaicOutput& out,

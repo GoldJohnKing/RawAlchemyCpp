@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Postprocessing primitives for x-veon NN demosaic.
-// Algorithms: see docs/nn-demosaic-design.md §2.4.
 #pragma once
 #include <cstddef>
 #include "nn_preprocess.h"  // for NN_PATCH_SIZE, NN_OVERLAP

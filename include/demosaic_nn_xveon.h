@@ -6,7 +6,7 @@
 //   normalize -> per-site WB -> highlight recon -> phase-align/mirror-pad -> tile -> infer (ORT)
 //   -> trapezoid blend -> hand off accumulators (caller crops, normalizes,
 //      applies color matrix + flip).
-// Algorithm: see docs/nn-demosaic-design.md §2.3-§2.4.
+// Algorithm details are documented inline in demosaic_nn_xveon.cpp (pipeline comment).
 //
 // ORT is PIMPL-isolated: this header does NOT include any ORT header. The
 // single entry point takes a plain-CFA input bundle and fills an
@@ -25,7 +25,7 @@ struct NnDemosaicInput {
     unsigned filters = 0;   // LibRaw CFA bitmask (filters == 9 marks X-Trans)
     const float* cfaMosaic = nullptr;  // [width*height], raw CFA (pre-normalization)
 
-    float blackLevel = 0.0f;     // single black point for all sites (design §2.3 step 3)
+    float blackLevel = 0.0f;     // single black point for all sites (normalize step)
     float whiteLevel = 1.0f;     // single white point; >blackLevel or buffer is zeroed
 
     // Per-channel white balance multipliers (G normalized to ~1.0 by convention).
@@ -69,7 +69,7 @@ struct NnDemosaicOutput {
 enum class NnDemosaicStatus {
     Ok,
     SessionNotReady,
-    NaNOutput,         // inference output contained NaN/Inf (design §6.2: error, do not fall back)
+    NaNOutput,         // inference output contained NaN/Inf (error, do not fall back)
     InferenceFailed,   // Ort::Exception during Run (non-NaN); treat like init failure upstream
     InvalidParam       // null pointers, zero dimensions, etc.
 };

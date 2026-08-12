@@ -2,11 +2,11 @@
 // ORT session singleton for the x-veon NN demosaic.
 // Owns the Ort::Env plus two Ort::Sessions (bayer.onnx + xtrans.onnx) and
 // registers the platform execution provider:
-//   Android  -> QNN HTP FP16  (design docs/nn-demosaic-design.md sec 3.2; SoC-gated upstream)
-//   Windows  -> DirectML      (sec 3.3; app-local DLL, primary DX12 adapter)
+//   Android  -> QNN HTP FP16  (SoC-gated upstream; Hexagon v73+ required)
+//   Windows  -> DirectML      (app-local DLL, primary DX12 adapter)
 //   Linux    -> CPU EP        (dev-loop only; no GPU EP is wired on Linux)
 // EP/session init failure is permanent: isReady() returns false and the pipeline
-// falls back to the traditional demosaic (sec 3.4 / 6.1). init() never throws.
+// falls back to the traditional demosaic. init() never throws.
 //
 // PIMPL: the heavy Ort:: types (Env, Session) live only in nn_session.cpp, so
 // including this header does NOT pull the ORT C++ wrapper header into callers.
@@ -45,7 +45,7 @@ struct NnSessionConfig {
     int intraOpNumThreads = 1;    // ORT intra-op thread pool size (inter-op pinned to 1; see .cpp)
 
 #ifdef _WIN32
-    // App-local DirectML.dll (design sec 3.3). Its directory is prepended to the
+    // App-local DirectML.dll. Its directory is prepended to the
     // DLL search path so ORT loads OUR DirectML.dll, not a stale System32 copy.
     std::string directmlDllPath;
 #elif defined(__ANDROID__)

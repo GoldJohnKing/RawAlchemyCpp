@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Pure preprocessing primitives for x-veon NN demosaic.
-// Algorithms: see docs/nn-demosaic-design.md §2.3.
 #pragma once
 #include <cstddef>
 #include "cfa_lookup.h"  // for unsigned filters helpers
@@ -26,7 +25,7 @@ struct CfaPhase {
  *  period=6, dy=dx=0 (LibRaw delivers canonically-aligned X-Trans). */
 CfaPhase detectCfaPhase(unsigned filters);
 
-/** Tile constants — fixed by the static ONNX export (design §2.5). */
+/** Tile constants — fixed by the static ONNX export. */
 static constexpr int NN_PATCH_SIZE = 288;
 static constexpr int NN_OVERLAP = 48;
 static constexpr int NN_STRIDE = NN_PATCH_SIZE - NN_OVERLAP;  // 240

@@ -6,7 +6,7 @@
 //   1. correction = {1,1,1} (darktable's late=FALSE path). darktable's late=TRUE uses
 //      D85/as_shot ratios; we don't track those separately, and late=false is the
 //      simpler default that doesn't require chroma-adaptation metadata.
-//   2. clipFactor = 0.93 (design §2.3 step 4), not darktable's 0.987 default.
+//   2. clipFactor = 0.93, not darktable's 0.987 default.
 //   3. Single-threaded (no OpenMP). One-time per image; the tile-inference loop
 //      dominates latency and the !anyClipped fast path keeps well-exposed images cheap.
 //

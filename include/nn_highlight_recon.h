@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Inpaint-opposed highlight reconstruction for the x-veon NN demosaic pipeline.
 //
-// This is the step the design (docs/nn-demosaic-design.md §2.3 step 4) specified
-// but was originally skipped — see the former deviation comment in
-// demosaic_nn_xveon.cpp. It runs on the CFA mosaic in linear sensor space, BEFORE
+// This step was originally specified but skipped in early revisions — see the
+// former deviation comment in demosaic_nn_xveon.cpp. It runs on the CFA mosaic
+// in linear sensor space, BEFORE
 // white balance and BEFORE mirror-pad, reconstructing clipped sensels so the NN
 // model never sees the out-of-distribution (wb_R, 1, wb_B) magenta input that
 // fully-clipped highlights would otherwise produce after per-channel WB.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Implementation of the ORT session singleton (see nn_session.h).
 //
-// EP selection is platform-conditional (design docs/nn-demosaic-design.md sec 3):
+// EP selection is platform-conditional:
 //   _WIN32     -> DirectML (device 0, app-local DLL via SetDllDirectoryA)
 //   __ANDROID__-> QNN HTP FP16 (generic SessionOptionsAppendExecutionProvider,
 //                "QNN" + key/value map; CPU fallback disabled via session config)
@@ -127,7 +127,7 @@ bool fileExists(const std::string& path) {
 // platform EP registered. Throws Ort::Exception (caught by init()) on EP
 // registration failure.
 //
-// Thread pinning (design sec 3.4): the pipeline runs OpenMP-parallel tiles
+// Thread pinning: the pipeline runs OpenMP-parallel tiles
 // ABOVE the ORT session, so each session must itself be single-threaded
 // (intra=1, inter=1) to avoid thread oversubscription across tile workers.
 // intra is config-driven (defaults to 1); inter is hard-pinned to 1 since no
@@ -138,7 +138,7 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
     sopts.SetInterOpNumThreads(1);
 
 #ifdef _WIN32
-    // --- DirectML EP (design sec 3.3) ---
+    // --- DirectML EP ---
     // Bypass the stale System32 DirectML.dll (ORT issue #18831): prepend the
     // app-local DirectML.dll directory to the loader search path so the DML
     // device that ORT creates internally binds to OUR DLL. This is the
@@ -163,11 +163,11 @@ Ort::SessionOptions makeSessionOptions(const NnSessionConfig& cfg) {
     // GetExecutionProviderApi is exported by every onnxruntime.dll (generic or
     // DirectML build), so this links against the generic lib we vendor. With a
     // generic runtime DLL the call returns an error → Ort::ThrowOnError throws →
-    // init() catches it → graceful fallback to traditional demosaic (design
-    // sec 6.1). A DirectML-capable DLL is a deployment/packaging concern.
+    // graceful fallback to traditional demosaic. A DirectML-capable DLL is a
+    // deployment/packaging concern.
     // The 2-arg _DML form takes only device_id; ORT internally enumerates +
     // creates the D3D12 device (device_id 0 = primary DX12 adapter via
-    // IDXGIFactory). This is the "simplest v1 form" from design sec 3.3 (ORT
+    // IDXGIFactory). This is the "simplest v1 form" (ORT
     // owns DMLCreateDevice). GetExecutionProviderApi writes into a `const void*`
     // out-param (the ORT C API signature), which we then cast to OrtDmlApi*.
     const void* dmlApiVoid = nullptr;

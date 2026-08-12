@@ -24,7 +24,7 @@ NnDemosaicStatus demosaicDispatch(const NnDemosaicInput& in,
                                   DemosaicPath path) {
     switch (path) {
         case DemosaicPath::Neural:
-            // Verbatim status — no auto-fallback (design §6.2).
+            // Verbatim status — no auto-fallback.
             return nnDemosaic(in, out);
         case DemosaicPath::Classical:
             // Plan A stub. Plan B will route Bayer (filters != 9) ->

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Implementation of the x-veon NN demosaic tile loop + dispatch entry point.
 //
-// Pipeline (design docs/nn-demosaic-design.md §2.3-§2.4):
+// Pipeline:
 //   1. param validation + session readiness
 //   2. normalize CFA in place (working copy): (raw - black) / (white - black)
 //   3. per-site white balance on the working copy
@@ -15,8 +15,8 @@
 //   8. hand off the accumulated buffers + geometry (caller finalizes: crop +
 //      weight-normalize + color matrix + orientation flip)
 //
-// Highlight reconstruction (step 3) implements design §2.3 step 4 (inpaint-opposed,
-// ported from darktable). Earlier revisions shipped without it and clipped highlights
+// Highlight reconstruction (step 4) implements inpaint-opposed (ported from darktable).
+// Earlier revisions shipped without it and clipped highlights
 // showed a magenta cast — the model was trained on non-clipped [0,1] data and
 // hallucinated chromaticity into saturated regions after per-channel WB amplification.
 // See nn_highlight_recon.cpp for the algorithm and the deliberate deviations from
@@ -81,7 +81,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         return NnDemosaicStatus::InvalidParam;
     }
 
-    // --- Step 1b: session readiness (design §6.1: NN unavailable -> caller falls back) ---
+    // --- Step 1b: session readiness (NN unavailable -> caller falls back) ---
     NnDemosaicSession& session = NnDemosaicSession::instance();
     if (!session.isReady()) {
         return NnDemosaicStatus::SessionNotReady;
@@ -186,7 +186,7 @@ NnDemosaicStatus nnDemosaic(const NnDemosaicInput& in, NnDemosaicOutput& out) {
         Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     const std::array<int64_t, 4> inShape = {1, 4, NPS, NPS};
 
-    // Early-exit flags shared across tile workers (design §6.2: NaN -> error).
+    // Early-exit flags shared across tile workers (NaN -> error).
     std::atomic<bool> nanDetected{false};
     std::atomic<bool> inferenceFailed{false};
 
